@@ -14,7 +14,7 @@ export function createAnthropicProvider(
     async *stream({ prompt }: AiInput): AsyncIterable<string> {
       const stream = client.messages.stream({
         model: cfg.model,
-        max_tokens: cfg.maxTokens,
+        max_tokens: 8192,
         system: cfg.systemPrompt,
         messages: [{ role: "user", content: prompt }],
         ...(cfg.anthropicThinkingBudget

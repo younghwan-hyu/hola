@@ -40,7 +40,6 @@ export interface AiConfig {
   provider: AiProviderName;
   model: string;
   systemPrompt: string;
-  maxTokens: number;
   openaiReasoning?: string;
   anthropicThinkingBudget?: number;
 }
@@ -88,7 +87,6 @@ function parseAi(): AiConfig {
     model: required("AI_MODEL"),
     systemPrompt:
       optional("AI_SYSTEM_PROMPT") ?? "You are a helpful assistant.",
-    maxTokens: optionalInt("AI_MAX_TOKENS") ?? 2048,
     openaiReasoning: optional("AI_OPENAI_REASONING"),
     anthropicThinkingBudget: optionalInt("AI_ANTHROPIC_THINKING_BUDGET"),
   };

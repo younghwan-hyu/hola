@@ -14,7 +14,6 @@ export function createOpenAiProvider(
     async *stream({ prompt }: AiInput): AsyncIterable<string> {
       const stream = await client.chat.completions.create({
         model: cfg.model,
-        max_tokens: cfg.maxTokens,
         stream: true,
         messages: [
           { role: "system", content: cfg.systemPrompt },
