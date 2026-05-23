@@ -12,6 +12,10 @@ export function createGoogleTtsProvider(cfg: TtsConfig): TtsProvider {
 
   return {
     name: "google",
+    async warmup(): Promise<void> {
+      // Opens auth + gRPC channel without a billable API call.
+      await client.initialize();
+    },
     async *stream({ text }: TtsInput): AsyncIterable<Uint8Array> {
       const stream = client.streamingSynthesize();
 

@@ -11,6 +11,15 @@ export function createAnthropicProvider(
 
   return {
     name: "anthropic",
+    async warmup(): Promise<void> {
+      // SDK 0.32.x has no models.list / countTokens — cheapest warm path is a
+      // 1-token messages.create (~$0.0001 per startup).
+      await client.messages.create({
+        model: cfg.model,
+        max_tokens: 1,
+        messages: [{ role: "user", content: "." }],
+      });
+    },
     async *stream({ prompt }: AiInput): AsyncIterable<string> {
       const stream = client.messages.stream({
         model: cfg.model,

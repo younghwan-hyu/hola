@@ -11,6 +11,9 @@ export function createOpenAiProvider(
 
   return {
     name: "openai",
+    async warmup(): Promise<void> {
+      await client.models.list();
+    },
     async *stream({ prompt }: AiInput): AsyncIterable<string> {
       const stream = await client.chat.completions.create({
         model: cfg.model,

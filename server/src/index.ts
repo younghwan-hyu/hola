@@ -35,4 +35,26 @@ app.listen(config.port, () => {
   console.log(
     `[hola] stt=${config.stt.provider}/${config.stt.model} ai=${config.ai.provider}/${config.ai.model} tts=${config.tts.provider}/${config.tts.voice}`,
   );
+
+  // Warm clients in parallel — don't block listen, log per-provider failure.
+  const warmupStart = Date.now();
+  const tasks: Array<[string, Promise<void>]> = [
+    ["stt", stt.warmup()],
+    ["ai", ai.warmup()],
+    ["tts", tts.warmup()],
+  ];
+  void Promise.all(
+    tasks.map(async ([name, p]) => {
+      const t0 = Date.now();
+      try {
+        await p;
+        console.log(`[hola] warmup ${name} ok (${Date.now() - t0}ms)`);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.warn(`[hola] warmup ${name} failed: ${msg}`);
+      }
+    }),
+  ).then(() => {
+    console.log(`[hola] warmup total ${Date.now() - warmupStart}ms`);
+  });
 });

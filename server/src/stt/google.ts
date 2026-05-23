@@ -17,6 +17,10 @@ export function createGoogleSttProvider(cfg: SttConfig): SttProvider {
 
   return {
     name: "google",
+    async warmup(): Promise<void> {
+      // Opens auth + gRPC channel without a billable API call.
+      await client.initialize();
+    },
     async recognize({ audio, mimeType }: SttInput): Promise<SttResult> {
       const [response] = await client.recognize({
         config: {
