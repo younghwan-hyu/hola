@@ -53,6 +53,11 @@ export type ChatEvent =
   | { type: "tts_start"; sentenceIdx: number; text: string }
   | { type: "tts_chunk"; sentenceIdx: number; audio: string }
   | { type: "tts_end"; sentenceIdx: number }
+  | {
+      type: "timing";
+      phase: "stt" | "ai_ttft" | "ai_total" | "tts_first_chunk" | "tts_total";
+      ms: number;
+    }
   | { type: "done" }
   | { type: "error"; message: string };
 
@@ -63,6 +68,7 @@ const EVENT_TYPES = [
   "tts_start",
   "tts_chunk",
   "tts_end",
+  "timing",
   "done",
   "error",
 ] as const;

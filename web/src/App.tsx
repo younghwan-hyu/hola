@@ -1,10 +1,9 @@
-import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
-import { Keyboard, Loader2, Mic, Send, Volume2 } from "lucide-react";
+import { Fragment, useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { Loader2, Send } from "lucide-react";
 
 import { Recorder } from "@/components/Recorder";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
 import {
   fetchHealth,
@@ -22,6 +21,13 @@ interface Turn {
   ai: string;
   status: "running" | "done" | "error";
   errorMessage?: string;
+  timing: {
+    sttMs?: number;
+    aiTtftMs?: number;
+    aiTotalMs?: number;
+    ttsFirstChunkMs?: number;
+    ttsTotalMs?: number;
+  };
 }
 
 const newId = () => Math.random().toString(36).slice(2, 10);
@@ -60,6 +66,7 @@ export default function App() {
         userSource: payload.audio ? "audio-pending" : "text",
         ai: "",
         status: "running",
+        timing: {},
       },
     ]);
 
@@ -96,6 +103,22 @@ export default function App() {
                     player.appendPcm(base64ToArrayBuffer(ev.audio));
                   }
                   return t;
+                case "timing": {
+                  const key =
+                    ev.phase === "stt"
+                      ? "sttMs"
+                      : ev.phase === "ai_ttft"
+                        ? "aiTtftMs"
+                        : ev.phase === "ai_total"
+                          ? "aiTotalMs"
+                          : ev.phase === "tts_first_chunk"
+                            ? "ttsFirstChunkMs"
+                            : "ttsTotalMs";
+                  return {
+                    ...t,
+                    timing: { ...t.timing, [key]: ev.ms },
+                  };
+                }
                 case "done":
                   player.finish();
                   setBusy(false);
@@ -197,45 +220,64 @@ export default function App() {
             </div>
           ) : (
             turns.map((t) => (
-              <Card key={t.id}>
-                <CardContent className="flex flex-col gap-3">
-                  <div>
-                    <Badge variant="secondary" className="mb-1 gap-1">
-                      {t.userSource === "audio" ||
-                      t.userSource === "audio-pending" ? (
-                        <Mic className="h-3 w-3" />
-                      ) : (
-                        <Keyboard className="h-3 w-3" />
-                      )}
+              <Fragment key={t.id}>
+                <div className="flex justify-end">
+                  <div className="flex max-w-[80%] flex-col items-end gap-1">
+                    <div className="px-1 text-[10px] text-muted-foreground">
                       You
-                    </Badge>
-                    <p className="whitespace-pre-wrap break-words text-sm">
-                      {t.userSource === "audio-pending" && !t.user
-                        ? "음성 인식 중..."
-                        : t.user || "..."}
-                    </p>
-                  </div>
-                  <div>
-                    <Badge className="mb-1 gap-1">
-                      Assistant
-                      {t.status === "running" && (
-                        <Loader2 className="h-3 w-3 animate-spin" />
-                      )}
-                      {audioSupported && t.status !== "error" && (
-                        <Volume2 className="h-3 w-3" />
-                      )}
-                    </Badge>
-                    <p className="whitespace-pre-wrap break-words text-sm">
-                      {t.ai || (t.status === "running" ? "..." : "")}
-                    </p>
-                    {t.errorMessage && (
-                      <p className="mt-2 text-xs text-destructive">
-                        {t.errorMessage}
+                    </div>
+                    <div className="rounded-2xl rounded-br-sm bg-primary px-4 py-2 text-sm text-primary-foreground">
+                      <p className="whitespace-pre-wrap break-words">
+                        {t.userSource === "audio-pending" && !t.user
+                          ? "음성 인식 중..."
+                          : t.user || "..."}
                       </p>
+                    </div>
+                    {t.timing.sttMs !== undefined && (
+                      <div className="px-1 text-[10px] text-sky-400">
+                        STT {t.timing.sttMs}ms
+                      </div>
                     )}
                   </div>
-                </CardContent>
-              </Card>
+                </div>
+                <div className="flex justify-start">
+                  <div className="flex max-w-[80%] flex-col items-start gap-1">
+                    <div className="px-1 text-[10px] text-muted-foreground">
+                      Assistant
+                    </div>
+                    <div className="rounded-2xl rounded-bl-sm bg-muted px-4 py-2 text-sm">
+                      <p className="whitespace-pre-wrap break-words">
+                        {t.ai || (t.status === "running" ? "..." : "")}
+                      </p>
+                      {t.errorMessage && (
+                        <p className="mt-2 text-xs text-destructive">
+                          {t.errorMessage}
+                        </p>
+                      )}
+                    </div>
+                    {(t.timing.aiTtftMs !== undefined ||
+                      t.timing.aiTotalMs !== undefined) && (
+                      <div className="px-1 text-[10px] text-sky-400">
+                        AI
+                        {t.timing.aiTtftMs !== undefined &&
+                          ` 첫 응답 ${t.timing.aiTtftMs}ms`}
+                        {t.timing.aiTotalMs !== undefined &&
+                          ` 총 시간 ${t.timing.aiTotalMs}ms`}
+                      </div>
+                    )}
+                    {(t.timing.ttsFirstChunkMs !== undefined ||
+                      t.timing.ttsTotalMs !== undefined) && (
+                      <div className="px-1 text-[10px] text-sky-400">
+                        TTS
+                        {t.timing.ttsFirstChunkMs !== undefined &&
+                          ` 첫 응답 ${t.timing.ttsFirstChunkMs}ms`}
+                        {t.timing.ttsTotalMs !== undefined &&
+                          ` 총 시간 ${t.timing.ttsTotalMs}ms`}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </Fragment>
             ))
           )}
           <div ref={turnsEndRef} />

@@ -31,12 +31,14 @@ export async function runPipeline(
   try {
     let userText: string;
     if (input.audio) {
+      const sttStart = Date.now();
       const sttResult = await deps.stt.recognize({
         audio: input.audio.bytes,
         mimeType: input.audio.mimeType,
       });
       userText = sttResult.text;
       session.emit({ type: "stt", text: userText, source: "audio" });
+      session.emit({ type: "timing", phase: "stt", ms: Date.now() - sttStart });
     } else if (input.text !== undefined) {
       userText = input.text;
       session.emit({ type: "stt", text: userText, source: "text" });
@@ -52,14 +54,25 @@ export async function runPipeline(
     const splitter = new SentenceSplitter(deps.sentenceBoundaryChars);
     let sentenceIdx = 0;
     let ttsChain: Promise<void> = Promise.resolve();
+    let firstTtsCallTime: number | null = null;
+    let ttsFirstChunkReported = false;
 
     const enqueueTts = (sentence: string): void => {
       const idx = sentenceIdx++;
       ttsChain = ttsChain.then(async () => {
         if (session.isClosed) return;
+        if (firstTtsCallTime === null) firstTtsCallTime = Date.now();
         session.emit({ type: "tts_start", sentenceIdx: idx, text: sentence });
         for await (const chunk of deps.tts.stream({ text: sentence })) {
           if (session.isClosed) return;
+          if (!ttsFirstChunkReported && firstTtsCallTime !== null) {
+            ttsFirstChunkReported = true;
+            session.emit({
+              type: "timing",
+              phase: "tts_first_chunk",
+              ms: Date.now() - firstTtsCallTime,
+            });
+          }
           session.emit({
             type: "tts_chunk",
             sentenceIdx: idx,
@@ -70,8 +83,18 @@ export async function runPipeline(
       });
     };
 
+    const aiStart = Date.now();
     let aiAccum = "";
+    let aiTtftReported = false;
     for await (const delta of deps.ai.stream({ prompt: userText })) {
+      if (!aiTtftReported) {
+        aiTtftReported = true;
+        session.emit({
+          type: "timing",
+          phase: "ai_ttft",
+          ms: Date.now() - aiStart,
+        });
+      }
       aiAccum += delta;
       session.emit({ type: "ai_delta", text: delta });
       for (const sentence of splitter.push(delta)) {
@@ -82,8 +105,20 @@ export async function runPipeline(
     if (trailing) enqueueTts(trailing);
 
     session.emit({ type: "ai_complete", text: aiAccum });
+    session.emit({
+      type: "timing",
+      phase: "ai_total",
+      ms: Date.now() - aiStart,
+    });
 
     await ttsChain;
+    if (firstTtsCallTime !== null) {
+      session.emit({
+        type: "timing",
+        phase: "tts_total",
+        ms: Date.now() - firstTtsCallTime,
+      });
+    }
     session.emit({ type: "done" });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
