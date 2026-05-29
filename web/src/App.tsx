@@ -22,7 +22,8 @@ interface Turn {
   status: "running" | "done" | "error";
   errorMessage?: string;
   timing: {
-    sttMs?: number;
+    sttClientMs?: number; // user-perceived: request sent -> transcript received
+    sttMs?: number; // server-side recognize() only
     aiTtftMs?: number;
     aiTotalMs?: number;
     ttsFirstChunkMs?: number;
@@ -71,6 +72,9 @@ export default function App() {
     ]);
 
     try {
+      // User-perceived STT clock: starts when we fire the request (so it covers
+      // audio upload + network), stops when the transcript (stt event) arrives.
+      const reqStart = Date.now();
       const handle = await startChat(payload);
 
       if (audioSupported && handle.config.audio.encoding === "PCM") {
@@ -90,7 +94,15 @@ export default function App() {
               if (t.id !== turnId) return t;
               switch (ev.type) {
                 case "stt":
-                  return { ...t, user: ev.text, userSource: ev.source };
+                  return {
+                    ...t,
+                    user: ev.text,
+                    userSource: ev.source,
+                    timing:
+                      ev.source === "audio"
+                        ? { ...t.timing, sttClientMs: Date.now() - reqStart }
+                        : t.timing,
+                  };
                 case "ai_delta":
                   return { ...t, ai: t.ai + ev.text };
                 case "ai_complete":
@@ -219,66 +231,77 @@ export default function App() {
               메시지를 입력하거나 마이크 버튼을 눌러 시작하세요.
             </div>
           ) : (
-            turns.map((t) => (
-              <Fragment key={t.id}>
-                <div className="flex justify-end">
-                  <div className="flex max-w-[80%] flex-col items-end gap-1">
-                    <div className="px-1 text-[10px] text-muted-foreground">
-                      You
-                    </div>
-                    <div className="rounded-2xl rounded-br-sm bg-primary px-4 py-2 text-sm text-primary-foreground">
-                      <p className="whitespace-pre-wrap break-words">
-                        {t.userSource === "audio-pending" && !t.user
-                          ? "음성 인식 중..."
-                          : t.user || "..."}
-                      </p>
-                    </div>
-                    {t.timing.sttMs !== undefined && (
-                      <div className="px-1 text-[10px] text-sky-400">
-                        STT {t.timing.sttMs}ms
+            turns.map((t) => {
+              const showUser = t.user.length > 0;
+              const showAiBubble =
+                t.ai.length > 0 || t.errorMessage !== undefined;
+              const showAiTiming =
+                t.timing.aiTtftMs !== undefined ||
+                t.timing.aiTotalMs !== undefined;
+              const showTtsTiming =
+                t.timing.ttsFirstChunkMs !== undefined ||
+                t.timing.ttsTotalMs !== undefined;
+              return (
+                <Fragment key={t.id}>
+                  {(showUser || t.timing.sttClientMs !== undefined) && (
+                    <div className="flex justify-end">
+                      <div className="flex max-w-[80%] flex-col items-end gap-1">
+                        {showUser && (
+                          <div className="rounded-2xl rounded-br-sm bg-primary px-4 py-2 text-sm text-primary-foreground">
+                            <p className="whitespace-pre-wrap break-words">
+                              {t.user}
+                            </p>
+                          </div>
+                        )}
+                        {t.timing.sttClientMs !== undefined && (
+                          <div className="px-1 text-[10px] text-sky-400">
+                            STT 총 시간 {t.timing.sttClientMs}ms
+                          </div>
+                        )}
                       </div>
-                    )}
-                  </div>
-                </div>
-                <div className="flex justify-start">
-                  <div className="flex max-w-[80%] flex-col items-start gap-1">
-                    <div className="px-1 text-[10px] text-muted-foreground">
-                      Assistant
                     </div>
-                    <div className="rounded-2xl rounded-bl-sm bg-muted px-4 py-2 text-sm">
-                      <p className="whitespace-pre-wrap break-words">
-                        {t.ai || (t.status === "running" ? "..." : "")}
-                      </p>
-                      {t.errorMessage && (
-                        <p className="mt-2 text-xs text-destructive">
-                          {t.errorMessage}
-                        </p>
-                      )}
+                  )}
+                  {(showAiBubble || showAiTiming || showTtsTiming) && (
+                    <div className="flex justify-start">
+                      <div className="flex max-w-[80%] flex-col items-start gap-1">
+                        {showAiBubble && (
+                          <div className="rounded-2xl rounded-bl-sm bg-muted px-4 py-2 text-sm">
+                            {t.ai.length > 0 && (
+                              <p className="whitespace-pre-wrap break-words">
+                                {t.ai}
+                              </p>
+                            )}
+                            {t.errorMessage && (
+                              <p className="mt-2 text-xs text-destructive">
+                                {t.errorMessage}
+                              </p>
+                            )}
+                          </div>
+                        )}
+                        {showAiTiming && (
+                          <div className="px-1 text-[10px] text-sky-400">
+                            AI
+                            {t.timing.aiTtftMs !== undefined &&
+                              ` 첫 응답 ${t.timing.aiTtftMs}ms`}
+                            {t.timing.aiTotalMs !== undefined &&
+                              ` 총 시간 ${t.timing.aiTotalMs}ms`}
+                          </div>
+                        )}
+                        {showTtsTiming && (
+                          <div className="px-1 text-[10px] text-sky-400">
+                            TTS
+                            {t.timing.ttsFirstChunkMs !== undefined &&
+                              ` 첫 응답 ${t.timing.ttsFirstChunkMs}ms`}
+                            {t.timing.ttsTotalMs !== undefined &&
+                              ` 총 시간 ${t.timing.ttsTotalMs}ms`}
+                          </div>
+                        )}
+                      </div>
                     </div>
-                    {(t.timing.aiTtftMs !== undefined ||
-                      t.timing.aiTotalMs !== undefined) && (
-                      <div className="px-1 text-[10px] text-sky-400">
-                        AI
-                        {t.timing.aiTtftMs !== undefined &&
-                          ` 첫 응답 ${t.timing.aiTtftMs}ms`}
-                        {t.timing.aiTotalMs !== undefined &&
-                          ` 총 시간 ${t.timing.aiTotalMs}ms`}
-                      </div>
-                    )}
-                    {(t.timing.ttsFirstChunkMs !== undefined ||
-                      t.timing.ttsTotalMs !== undefined) && (
-                      <div className="px-1 text-[10px] text-sky-400">
-                        TTS
-                        {t.timing.ttsFirstChunkMs !== undefined &&
-                          ` 첫 응답 ${t.timing.ttsFirstChunkMs}ms`}
-                        {t.timing.ttsTotalMs !== undefined &&
-                          ` 총 시간 ${t.timing.ttsTotalMs}ms`}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </Fragment>
-            ))
+                  )}
+                </Fragment>
+              );
+            })
           )}
           <div ref={turnsEndRef} />
         </main>
@@ -293,12 +316,16 @@ export default function App() {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={onKeyDown}
-            placeholder="메시지를 입력하거나 마이크 버튼을 누르세요"
+            placeholder=""
             disabled={busy}
             rows={2}
             className="resize-none"
           />
           <div className="flex flex-col gap-1">
+            <Recorder
+              disabled={busy}
+              onCaptured={(blob) => void send({ audio: blob })}
+            />
             <Button
               type="submit"
               disabled={busy || input.trim().length === 0}
@@ -311,10 +338,6 @@ export default function App() {
                 <Send className="h-4 w-4" />
               )}
             </Button>
-            <Recorder
-              disabled={busy}
-              onCaptured={(blob) => void send({ audio: blob })}
-            />
           </div>
         </div>
       </form>
