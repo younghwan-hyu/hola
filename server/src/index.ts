@@ -5,13 +5,16 @@ import { createAiProvider } from "./ai/index.ts";
 import { config } from "./config.ts";
 import { createChatRouter } from "./routes/chat.ts";
 import { createSttProvider } from "./stt/index.ts";
+import { createTools } from "./tools/index.ts";
 import { createTtsProvider } from "./tts/index.ts";
 
 const stt = createSttProvider(config.stt);
-const ai = createAiProvider(config.ai, {
-  openaiKey: config.openaiKey,
-  anthropicKey: config.anthropicKey,
-});
+const tools = createTools();
+const ai = createAiProvider(
+  config.ai,
+  { openaiKey: config.openaiKey, anthropicKey: config.anthropicKey },
+  tools,
+);
 const tts = createTtsProvider(config.tts);
 
 const app = express();
@@ -35,6 +38,7 @@ app.listen(config.port, () => {
   console.log(
     `[hola] stt=${config.stt.provider}/${config.stt.model} ai=${config.ai.provider}/${config.ai.model} tts=${config.tts.provider}/${config.tts.voice}`,
   );
+  console.log(`[hola] tools=[${tools.map((t) => t.name).join(", ")}]`);
 
   // Warm clients in parallel — don't block listen, log per-provider failure.
   const warmupStart = Date.now();
