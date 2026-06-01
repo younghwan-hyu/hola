@@ -67,13 +67,14 @@ export function Recorder({ disabled, onCaptured }: Props) {
   };
 
   return (
-    <div className="flex flex-col items-stretch gap-1">
+    <div className="flex shrink-0 flex-col items-stretch gap-1">
       <Button
         type="button"
         variant={recording ? "destructive" : "outline"}
         disabled={disabled && !recording}
         onClick={recording ? stop : start}
         size="icon"
+        className="h-11 w-11 shrink-0"
         title={recording ? "Stop recording" : "Record"}
       >
         {recording ? (

@@ -4,6 +4,10 @@
  *
  * Web Audio resamples on the fly, so the PCM source rate (e.g. 24000Hz) does
  * not have to match the AudioContext output rate (typically 48000Hz).
+ *
+ * Every scheduled source is routed through a shared AnalyserNode
+ * (source -> analyser -> destination) so the UI can read the currently-audible
+ * amplitude and drive avatar lip-sync. See {@link getLevel}.
  */
 export interface PcmFormat {
   sampleRateHertz: number;
@@ -13,6 +17,8 @@ export interface PcmFormat {
 
 export class StreamingPcmPlayer {
   private ctx: AudioContext | null = null;
+  private analyser: AnalyserNode | null = null;
+  private timeData: Float32Array<ArrayBuffer> | null = null;
   private nextStartTime = 0;
   private format: PcmFormat = {
     sampleRateHertz: 24000,
@@ -49,6 +55,19 @@ export class StreamingPcmPlayer {
       (window as unknown as { webkitAudioContext: typeof AudioContext })
         .webkitAudioContext;
     this.ctx = new Ctor();
+    // Some browsers start the context suspended until a user gesture; calling
+    // resume() here is safe because send() is triggered from a click/keypress.
+    void this.ctx.resume().catch(() => {});
+
+    const analyser = this.ctx.createAnalyser();
+    analyser.fftSize = 1024;
+    // We apply our own attack/decay smoothing on the RMS, so keep the raw
+    // analyser unsmoothed for a responsive mouth.
+    analyser.smoothingTimeConstant = 0;
+    analyser.connect(this.ctx.destination);
+    this.analyser = analyser;
+    this.timeData = new Float32Array(analyser.fftSize);
+
     this.nextStartTime = this.ctx.currentTime;
     this.leftoverByte = null;
   }
@@ -74,11 +93,7 @@ export class StreamingPcmPlayer {
     if (bytes.length === 0) return;
 
     const sampleCount = bytes.length / 2;
-    const view = new DataView(
-      bytes.buffer,
-      bytes.byteOffset,
-      bytes.byteLength,
-    );
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     const float32 = new Float32Array(sampleCount);
     for (let i = 0; i < sampleCount; i++) {
       float32[i] = view.getInt16(i * 2, true) / 32768;
@@ -93,11 +108,35 @@ export class StreamingPcmPlayer {
 
     const source = ctx.createBufferSource();
     source.buffer = audioBuffer;
-    source.connect(ctx.destination);
+    source.connect(this.analyser ?? ctx.destination);
 
     const startAt = Math.max(ctx.currentTime, this.nextStartTime);
     source.start(startAt);
     this.nextStartTime = startAt + audioBuffer.duration;
+  }
+
+  /**
+   * Instantaneous loudness of what is audible right now, as RMS of the analyser
+   * time-domain window. ~0 when silent, rising toward ~0.3 for loud speech.
+   * Callers smooth/scale this into a 0..1 mouth-open weight.
+   */
+  getLevel(): number {
+    const analyser = this.analyser;
+    const data = this.timeData;
+    if (!analyser || !data) return 0;
+    analyser.getFloatTimeDomainData(data);
+    let sum = 0;
+    for (let i = 0; i < data.length; i++) {
+      const v = data[i] ?? 0;
+      sum += v * v;
+    }
+    return Math.sqrt(sum / data.length);
+  }
+
+  /** True while audio is scheduled to keep playing past the current time. */
+  isPlaying(): boolean {
+    if (!this.ctx) return false;
+    return this.nextStartTime > this.ctx.currentTime + 0.02;
   }
 
   finish(): void {
@@ -109,6 +148,8 @@ export class StreamingPcmPlayer {
       void this.ctx.close().catch(() => {});
       this.ctx = null;
     }
+    this.analyser = null;
+    this.timeData = null;
     this.nextStartTime = 0;
     this.leftoverByte = null;
   }

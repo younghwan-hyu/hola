@@ -22,7 +22,7 @@
 ```
 .
 ├── server/         # TypeScript + Express, STT/AI/TTS provider 추상화
-├── web/            # Vite + React + shadcn/ui, MediaSource 기반 청크 재생
+├── web/            # Vite + React + three.js VRM 아바타 (립싱크/제스처), Web Audio 청크 재생
 └── compose.yml     # 한 번에 띄우기
 ```
 
@@ -54,23 +54,30 @@ cd web && npm install && npm run dev
 
 ## 환경 변수 (server/.env)
 
-`server/.env.example` 참고. 핵심:
+전체 목록은 `server/.env.example` 참고.
 
 | 항목 | 키 | 기본 |
 |---|---|---|
+| 포트 | `PORT` | `3000` |
+| OpenAI 키 | `OPENAI_KEY` | (필수) |
+| Anthropic 키 | `ANTHROPIC_KEY` | (필수) |
+| Google 인증 | `GOOGLE_APPLICATION_CREDENTIALS` | 서비스 계정 JSON 경로 |
 | STT provider | `STT_PROVIDER` | `google` |
 | STT 모델 | `STT_MODEL` | `latest_long` |
 | STT 언어 | `STT_LANGUAGE` | `ko-KR` |
-| AI provider | `AI_PROVIDER` | `openai` \| `anthropic` |
-| AI 모델 | `AI_MODEL` | `gpt-4o-mini` 등 |
-| AI 시스템 프롬프트 | `AI_SYSTEM_PROMPT` | (string) |
+| STT 샘플레이트 | `STT_SAMPLE_RATE_HERTZ` | (opt, 미지정 시 컨테이너에서 추론) |
+| AI provider | `AI_PROVIDER` | `openai` (또는 `anthropic`) |
+| AI 모델 | `AI_MODEL` | (필수, 예: `gpt-4o-mini`) |
+| AI 시스템 프롬프트 | `AI_SYSTEM_PROMPT` | `You are a helpful assistant.` |
 | OpenAI reasoning | `AI_OPENAI_REASONING` | `minimal/low/medium/high` (opt) |
 | Anthropic 확장 사고 예산 | `AI_ANTHROPIC_THINKING_BUDGET` | tokens (opt) |
 | TTS provider | `TTS_PROVIDER` | `google` |
-| TTS 보이스 | `TTS_VOICE` | `ko-KR-Chirp3-HD-Achernar` |
+| TTS 보이스 | `TTS_VOICE` | (필수, 예: `ko-KR-Chirp3-HD-Achernar`) |
+| TTS 언어 | `TTS_LANGUAGE` | `ko-KR` |
 | TTS 샘플레이트 | `TTS_SAMPLE_RATE_HERTZ` | `24000` |
-| TTS 오디오 포맷 | `TTS_AUDIO_ENCODING` | `PCM` \| `OGG_OPUS` |
+| TTS 오디오 포맷 | `TTS_AUDIO_ENCODING` | `PCM` (또는 `OGG_OPUS`) |
 | 문장 분할 기호 | `SENTENCE_BOUNDARY_CHARS` | `.,!?;:\n。，！？；：` |
+| Python 실행 파일 (weather tool) | `PYTHON_BIN` | `python3` |
 
 ## 프로토콜
 
@@ -82,7 +89,13 @@ multipart/form-data 필드 중 최소 하나:
 
 응답:
 ```json
-{ "session_id": "uuid", "config": { "stt": {...}, "ai": {...}, "tts": {...} } }
+{
+  "session_id": "uuid",
+  "config": {
+    "stt": {...}, "ai": {...}, "tts": {...},
+    "audio": { "encoding": "PCM", "sampleRateHertz": 24000, "channels": 1, "bitsPerSample": 16 }
+  }
+}
 ```
 
 ### `GET /api/chat/:session_id` — SSE 스트림
@@ -94,6 +107,7 @@ multipart/form-data 필드 중 최소 하나:
 - `tts_start` `{ sentenceIdx, text }`
 - `tts_chunk` `{ sentenceIdx, audio }` — base64로 인코딩된 오디오 바이트. 포맷은 `POST /api/chat` 응답의 `config.audio` 참고 (기본 PCM int16 LE 24kHz)
 - `tts_end` `{ sentenceIdx }`
+- `timing` `{ phase: "stt"|"ai_ttft"|"ai_total"|"tts_first_chunk"|"tts_total", ms }` — 각 단계 소요 시간(계측용)
 - `done` `{}`
 - `error` `{ message }`
 
