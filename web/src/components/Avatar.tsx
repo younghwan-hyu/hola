@@ -1,16 +1,18 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { VRMUtils, type VRM } from "@pixiv/three-vrm";
 
 import { loadVrm } from "@/lib/vrm";
+import { GESTURE_DURATION, type AvatarGesture } from "@/lib/gestures";
+
+export type { AvatarGesture };
 
 export type AvatarStatus = "loading" | "ready" | "error";
 
-export type AvatarGesture = "happy" | "sad" | "wave";
-
 export interface AvatarHandle {
-  /** Trigger a one-shot gesture (facial expression or wave). */
+  /** Trigger a one-shot gesture (expression, wave, or the sun). */
   playGesture: (gesture: AvatarGesture) => void;
 }
 
@@ -41,9 +43,7 @@ const MOUTH_DECAY = 0.4; // smoothing toward a more-closed target
 const BLINK_DURATION = 0.12; // seconds for a full close+open
 const VOWELS = ["ih", "ou", "ee", "oh"] as const;
 
-// Gesture timing.
-const EXPR_DURATION = 2.6; // happy / sad hold + fades
-const WAVE_DURATION = 1.6; // shorter, snappier wave
+// Per-gesture durations live in lib/gestures.ts (GESTURE_DURATION).
 
 // Right-arm rest rotations — must match setRelaxedPose() in lib/vrm.ts.
 const REST_UPPER_Z = THREE.MathUtils.degToRad(72);
@@ -72,12 +72,76 @@ const WORLD_UP = new THREE.Vector3(0, 1, 0);
 // perpendicular to the arm so it does not roll/twist the arm.
 const WAVE_FORWARD = 0.3;
 
+// "show_sunny" gesture: a glowing sun pops in front of the avatar, shines for a
+// moment, then fades out (duration in lib/gestures.ts).
+// Asset: CC-BY 3.0 "Sun" by Poly by Google (Poly Pizza, /m/77wHkzwlpOq).
+const SUN_MODEL_URL = `${import.meta.env.BASE_URL}sun.glb`; // in public/
+const SUN_TARGET_SIZE = 0.42; // largest dimension after normalizing (m)
+// Offset from the head: the narrow 30° FOV frames the face tightly, so the sun
+// floats in front of the upper chest (just below the chin) where there's open,
+// clearly-visible space, nudged slightly toward the camera so it reads as a
+// separate floating object.
+const SUN_OFFSET = new THREE.Vector3(0, -0.24, 0.45); // centred, down, toward camera
+const SUN_FALLBACK_POS = new THREE.Vector3(0, 1.08, 0.45); // used before the VRM loads
+const SUN_SPIN_SPEED = 0.6; // slow pinwheel spin about the view axis (rad/s)
+const SUN_BOB = 0.04; // vertical float amplitude (m)
+const SUN_BOB_SPEED = 1.5; // float speed (rad/s)
+const SUN_LIGHT_INTENSITY = 3; // warm point light cast on the avatar at full shine
+
 /** Trapezoid envelope: ramp up, hold at 1, ramp down. */
 function envelope(t: number, dur: number, rise: number, fall: number): number {
   if (t <= 0) return 0;
   if (t < rise) return t / rise;
   if (t > dur - fall) return Math.max(0, (dur - t) / fall);
   return 1;
+}
+
+/** Dispose a material and any textures hanging off it. */
+function disposeMaterial(material: THREE.Material): void {
+  for (const value of Object.values(material as unknown as Record<string, unknown>)) {
+    if (value && (value as THREE.Texture).isTexture) {
+      (value as THREE.Texture).dispose();
+    }
+  }
+  material.dispose();
+}
+
+/** Dispose every geometry/material/texture under an object (three doesn't do this for us). */
+function disposeObject3D(root: THREE.Object3D): void {
+  root.traverse((obj) => {
+    const mesh = obj as THREE.Mesh;
+    if (mesh.geometry) mesh.geometry.dispose();
+    const material = mesh.material;
+    if (material) {
+      if (Array.isArray(material)) material.forEach(disposeMaterial);
+      else disposeMaterial(material);
+    }
+  });
+}
+
+/**
+ * Load a GLB and normalize it: scale so its largest dimension is targetSize,
+ * then recentre it on the origin so it floats around its own centre.
+ */
+async function loadFloatingModel(
+  url: string,
+  targetSize: number,
+): Promise<THREE.Object3D> {
+  const gltf = await new GLTFLoader().loadAsync(url);
+  const model = gltf.scene;
+  const box = new THREE.Box3().setFromObject(model);
+  const size = new THREE.Vector3();
+  const center = new THREE.Vector3();
+  box.getSize(size);
+  box.getCenter(center);
+  const maxDim = Math.max(size.x, size.y, size.z) || 1;
+  const s = targetSize / maxDim;
+  model.scale.setScalar(s);
+  model.position.set(-center.x * s, -center.y * s, -center.z * s);
+  model.traverse((o) => {
+    o.frustumCulled = false;
+  });
+  return model;
 }
 
 export const Avatar = forwardRef<AvatarHandle, Props>(function Avatar(
@@ -113,6 +177,9 @@ export const Avatar = forwardRef<AvatarHandle, Props>(function Avatar(
     let rightUpperArm: THREE.Object3D | null = null;
     let rightLowerArm: THREE.Object3D | null = null;
     let rightHand: THREE.Object3D | null = null;
+    let sun: THREE.Group | null = null; // the show_sunny gesture sun (hidden until played)
+    let sunLight: THREE.PointLight | null = null;
+    let sunBaseY = SUN_FALLBACK_POS.y; // refined to head height once the VRM loads
 
     const width = container.clientWidth || 1;
     const height = container.clientHeight || 1;
@@ -145,6 +212,41 @@ export const Avatar = forwardRef<AvatarHandle, Props>(function Avatar(
     rim.position.set(-1.2, 1.2, -1);
     scene.add(rim);
     scene.add(new THREE.HemisphereLight(0xffffff, 0x444466, 1.0));
+
+    // show_sunny gesture sun: an empty group is placed up and in front of the
+    // avatar; the GLB loads into it and stays hidden until the gesture plays.
+    sun = new THREE.Group();
+    sun.position.copy(SUN_FALLBACK_POS);
+    sun.visible = false;
+    sunLight = new THREE.PointLight(0xffdd88, 0, 3.5, 2); // warm glow, off until shining
+    sun.add(sunLight);
+    scene.add(sun);
+
+    loadFloatingModel(SUN_MODEL_URL, SUN_TARGET_SIZE)
+      .then((model) => {
+        if (disposed || !sun) {
+          disposeObject3D(model);
+          return;
+        }
+        // Make the sun self-luminous so it glows against the dark background.
+        model.traverse((o) => {
+          const mesh = o as THREE.Mesh;
+          const mats = Array.isArray(mesh.material)
+            ? mesh.material
+            : mesh.material
+              ? [mesh.material]
+              : [];
+          for (const m of mats) {
+            const sm = m as THREE.MeshStandardMaterial;
+            if (sm.color && "emissive" in sm) {
+              sm.emissive = sm.color.clone();
+              sm.emissiveIntensity = 0.7;
+            }
+          }
+        });
+        sun.add(model);
+      })
+      .catch((err) => console.warn("sun GLB load failed", err));
 
     const clock = new THREE.Clock();
     let mouth = 0;
@@ -188,6 +290,16 @@ export const Avatar = forwardRef<AvatarHandle, Props>(function Avatar(
           camera.position.set(headPos.x, headPos.y + 0.05, headPos.z + 1.8);
           controls.target.set(headPos.x, headPos.y - 0.1, headPos.z);
           controls.update();
+
+          // Anchor the sunny-gesture sun up and in front of the head.
+          if (sun) {
+            sun.position.set(
+              headPos.x + SUN_OFFSET.x,
+              headPos.y + SUN_OFFSET.y,
+              headPos.z + SUN_OFFSET.z,
+            );
+            sunBaseY = sun.position.y;
+          }
         }
         // "ready" is reported from the render loop on the first painted frame
         // (see renderLoop) so the overlay clears exactly when the avatar shows.
@@ -213,18 +325,21 @@ export const Avatar = forwardRef<AvatarHandle, Props>(function Avatar(
         let sad = 0;
         let waveAmt = 0;
         let waveSwing = 0;
+        let sunny = 0;
         const g = gestureRef.current;
         if (g) {
           g.t += delta;
-          if (g.type === "happy") {
-            happy = envelope(g.t, EXPR_DURATION, 0.25, 0.6);
-          } else if (g.type === "sad") {
-            sad = envelope(g.t, EXPR_DURATION, 0.25, 0.6);
-          } else if (g.type === "wave") {
-            waveAmt = envelope(g.t, WAVE_DURATION, 0.4, 0.4);
+          const dur = GESTURE_DURATION[g.type];
+          if (g.type === "expression_happy") {
+            happy = envelope(g.t, dur, 0.25, 0.6);
+          } else if (g.type === "expression_sad") {
+            sad = envelope(g.t, dur, 0.25, 0.6);
+          } else if (g.type === "action_wave") {
+            waveAmt = envelope(g.t, dur, 0.4, 0.4);
             waveSwing = Math.sin(g.t * WAVE_SPEED) * WAVE_SWING * waveAmt;
+          } else if (g.type === "show_sunny") {
+            sunny = envelope(g.t, dur, 0.5, 0.8);
           }
-          const dur = g.type === "wave" ? WAVE_DURATION : EXPR_DURATION;
           if (g.t >= dur) gestureRef.current = null;
         }
 
@@ -327,6 +442,22 @@ export const Avatar = forwardRef<AvatarHandle, Props>(function Avatar(
         // --- Subtle idle sway ---
         vrm.scene.rotation.y = baseRotationY + Math.sin(t * 0.5) * 0.04;
 
+        // --- show_sunny gesture: pop the glowing sun in, spin + bob it while it shines ---
+        if (sun) {
+          if (sunny > 0) {
+            sun.visible = true;
+            sun.scale.setScalar(sunny); // pop in from nothing to full size
+            // Spin about the view axis (Z) so the flat, camera-facing sun turns
+            // like a pinwheel and never goes edge-on (a Y spin would hide it).
+            sun.rotation.z = t * SUN_SPIN_SPEED;
+            sun.position.y = sunBaseY + Math.sin(t * SUN_BOB_SPEED) * SUN_BOB;
+            if (sunLight) sunLight.intensity = SUN_LIGHT_INTENSITY * sunny;
+          } else if (sun.visible) {
+            sun.visible = false;
+            if (sunLight) sunLight.intensity = 0;
+          }
+        }
+
         vrm.update(delta);
 
         // Report ready once the avatar has actually rendered a frame.
@@ -356,6 +487,10 @@ export const Avatar = forwardRef<AvatarHandle, Props>(function Avatar(
       cancelAnimationFrame(rafId);
       resizeObserver.disconnect();
       controls.dispose();
+      if (sun) {
+        scene.remove(sun);
+        disposeObject3D(sun);
+      }
       if (vrm) VRMUtils.deepDispose(vrm.scene);
       renderer.dispose();
       if (renderer.domElement.parentNode === container) {

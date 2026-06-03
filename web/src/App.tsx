@@ -5,11 +5,10 @@ import {
   type FormEvent,
   type KeyboardEvent,
 } from "react";
-import { Frown, Hand, Loader2, Send, Smile, X } from "lucide-react";
+import { Loader2, Send, Smile, X } from "lucide-react";
 
 import {
   Avatar,
-  type AvatarGesture,
   type AvatarHandle,
   type AvatarStatus,
 } from "@/components/Avatar";
@@ -21,6 +20,7 @@ import {
   subscribeChat,
   type ChatEvent,
 } from "@/lib/api";
+import { GESTURES, type AvatarGesture } from "@/lib/gestures";
 import { base64ToArrayBuffer, StreamingPcmPlayer } from "@/lib/audio";
 
 const AVATAR_URL = import.meta.env.VITE_AVATAR_URL ?? "/avatar.vrm";
@@ -299,19 +299,13 @@ export default function App() {
             </button>
             <h2 className="mb-4 text-base font-semibold text-white">제스처</h2>
             <div className="flex flex-col gap-2">
-              {(
-                [
-                  { gesture: "happy", label: "기쁜 표정", icon: Smile },
-                  { gesture: "sad", label: "슬픈 표정", icon: Frown },
-                  { gesture: "wave", label: "손 흔들기", icon: Hand },
-                ] as { gesture: AvatarGesture; label: string; icon: typeof Smile }[]
-              ).map(({ gesture, label, icon: Icon }) => (
+              {GESTURES.map(({ id, label, icon: Icon }) => (
                 <Button
-                  key={gesture}
+                  key={id}
                   type="button"
                   variant="secondary"
                   className="h-12 justify-start gap-3 text-sm"
-                  onClick={() => triggerGesture(gesture)}
+                  onClick={() => triggerGesture(id)}
                 >
                   <Icon className="h-5 w-5" />
                   {label}
