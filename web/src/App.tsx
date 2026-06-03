@@ -5,7 +5,7 @@ import {
   type FormEvent,
   type KeyboardEvent,
 } from "react";
-import { Loader2, Send, Smile, X } from "lucide-react";
+import { ChevronDown, Loader2, MoreHorizontal, Send, Smile, X } from "lucide-react";
 
 import {
   Avatar,
@@ -25,16 +25,38 @@ import { base64ToArrayBuffer, StreamingPcmPlayer } from "@/lib/audio";
 
 const AVATAR_URL = import.meta.env.VITE_AVATAR_URL ?? "/avatar.vrm";
 
-interface Turn {
+type Role = "user" | "ai";
+
+interface Bubble {
   id: string;
-  user: string;
-  userSource: "audio" | "text" | "audio-pending";
-  ai: string;
-  status: "running" | "done" | "error";
-  errorMessage?: string;
+  role: Role;
+  text: string;
+  error?: string;
+  /** true while the bubble is sliding up and out, just before removal. */
+  leaving?: boolean;
 }
 
 const newId = () => Math.random().toString(36).slice(2, 10);
+
+const MAX_BUBBLES = 2; // most bubbles visible at once
+const EXIT_MS = 350; // keep a leaving bubble around this long for its exit anim
+
+/**
+ * Append a bubble to the rolling window. Once at capacity, the oldest still-live
+ * bubble is marked `leaving` (kept in the list so it can animate up and out) —
+ * so exactly one bubble leaves whenever a new one (user OR ai) appears.
+ */
+function addBubble(prev: Bubble[], next: Bubble): Bubble[] {
+  const leaving = prev.filter((b) => b.leaving);
+  const live = prev.filter((b) => !b.leaving);
+  const combined = [...live, next];
+  if (combined.length <= MAX_BUBBLES) return [...leaving, ...combined];
+  const overflow = combined.length - MAX_BUBBLES;
+  const newlyLeaving = combined
+    .slice(0, overflow)
+    .map((b) => ({ ...b, leaving: true }));
+  return [...leaving, ...newlyLeaving, ...combined.slice(overflow)];
+}
 
 export default function App() {
   const [audioSupported] = useState(() => StreamingPcmPlayer.isSupported());
@@ -42,29 +64,52 @@ export default function App() {
   const [avatarError, setAvatarError] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
-  const [turn, setTurn] = useState<Turn | null>(null);
+  // Chat as a rolling window of at most MAX_BUBBLES message bubbles (user & ai).
+  const [items, setItems] = useState<Bubble[]>([]);
   const [gestureOpen, setGestureOpen] = useState(false);
+  // Input is voice-first: collapsed shows only a hero mic + "..."; expanding
+  // reveals the full bar (text input + gesture button).
+  const [expanded, setExpanded] = useState(false);
 
   const playerRef = useRef<StreamingPcmPlayer>(new StreamingPcmPlayer());
   const avatarRef = useRef<AvatarHandle>(null);
+  const leavingTimers = useRef<Map<string, number>>(new Map());
 
   useEffect(() => {
-    return () => playerRef.current.dispose();
+    return () => {
+      playerRef.current.dispose();
+      for (const t of leavingTimers.current.values()) window.clearTimeout(t);
+      leavingTimers.current.clear();
+    };
   }, []);
+
+  // Remove each leaving bubble after its exit animation. Scheduled exactly once
+  // per bubble (guarded by the ref) so streaming re-renders don't reset it.
+  useEffect(() => {
+    for (const b of items) {
+      if (b.leaving && !leavingTimers.current.has(b.id)) {
+        const timer = window.setTimeout(() => {
+          leavingTimers.current.delete(b.id);
+          setItems((prev) => prev.filter((x) => x.id !== b.id));
+        }, EXIT_MS);
+        leavingTimers.current.set(b.id, timer);
+      }
+    }
+  }, [items]);
 
   const send = async (payload: { text?: string; audio?: Blob }) => {
     if (busy) return;
     setBusy(true);
     const turnId = newId();
+    const userId = `${turnId}:u`;
+    const aiId = `${turnId}:a`;
     const player = playerRef.current;
 
-    setTurn({
-      id: turnId,
-      user: payload.text ?? "",
-      userSource: payload.audio ? "audio-pending" : "text",
-      ai: "",
-      status: "running",
-    });
+    // Text input: the user message is known now (audio: added on the stt event).
+    if (payload.text && payload.text.length > 0) {
+      const text = payload.text;
+      setItems((prev) => addBubble(prev, { id: userId, role: "user", text }));
+    }
 
     try {
       const handle = await startChat(payload);
@@ -78,68 +123,80 @@ export default function App() {
         player.start();
       }
 
+      // The AI bubble is created on its first text (or error), then updated.
+      let aiCreated = false;
+      const onAiText = (text: string, append: boolean) => {
+        if (!aiCreated) {
+          aiCreated = true;
+          setItems((prev) => addBubble(prev, { id: aiId, role: "ai", text }));
+        } else {
+          setItems((prev) =>
+            prev.map((b) =>
+              b.id === aiId ? { ...b, text: append ? b.text + text : text } : b,
+            ),
+          );
+        }
+      };
+      const onAiError = (message: string) => {
+        player.finish();
+        setBusy(false);
+        if (!aiCreated) {
+          aiCreated = true;
+          setItems((prev) =>
+            addBubble(prev, { id: aiId, role: "ai", text: "", error: message }),
+          );
+        } else {
+          setItems((prev) =>
+            prev.map((b) => (b.id === aiId ? { ...b, error: message } : b)),
+          );
+        }
+      };
+
       subscribeChat(
         handle.sessionId,
         (ev: ChatEvent) => {
-          // Gesture commands parsed out of the AI stream: play them on the
-          // avatar. Pure side effect — no chat-turn state to update.
-          if (ev.type === "gesture") {
-            if (isAvatarGesture(ev.name)) {
-              avatarRef.current?.playGesture(ev.name);
-            }
-            return;
+          switch (ev.type) {
+            case "stt":
+              // For audio, the user bubble appears once the transcript is known.
+              if (ev.source === "audio") {
+                setItems((prev) =>
+                  addBubble(prev, { id: userId, role: "user", text: ev.text }),
+                );
+              }
+              return;
+            case "gesture":
+              if (isAvatarGesture(ev.name)) avatarRef.current?.playGesture(ev.name);
+              return;
+            case "ai_delta":
+              onAiText(ev.text, true);
+              return;
+            case "ai_complete":
+              onAiText(ev.text, false);
+              return;
+            case "tts_chunk":
+              if (audioSupported && handle.config.audio.encoding === "PCM") {
+                player.appendPcm(base64ToArrayBuffer(ev.audio));
+              }
+              return;
+            case "done":
+              player.finish();
+              setBusy(false);
+              return;
+            case "error":
+              onAiError(ev.message);
+              return;
           }
-          setTurn((prev) => {
-            if (!prev || prev.id !== turnId) return prev;
-            switch (ev.type) {
-              case "stt":
-                return { ...prev, user: ev.text, userSource: ev.source };
-              case "ai_delta":
-                return { ...prev, ai: prev.ai + ev.text };
-              case "ai_complete":
-                return { ...prev, ai: ev.text };
-              case "tts_chunk":
-                if (audioSupported && handle.config.audio.encoding === "PCM") {
-                  player.appendPcm(base64ToArrayBuffer(ev.audio));
-                }
-                return prev;
-              case "done":
-                player.finish();
-                setBusy(false);
-                return { ...prev, status: "done" };
-              case "error":
-                player.finish();
-                setBusy(false);
-                return {
-                  ...prev,
-                  status: "error",
-                  errorMessage: ev.message,
-                };
-              default:
-                return prev;
-            }
-          });
         },
         (err) => {
           console.error("SSE transport error", err);
-          setBusy(false);
-          setTurn((prev) =>
-            prev && prev.id === turnId
-              ? { ...prev, status: "error", errorMessage: "SSE 연결이 끊겼습니다" }
-              : prev,
-          );
+          onAiError("SSE 연결이 끊겼습니다");
         },
       );
     } catch (e) {
       setBusy(false);
-      setTurn((prev) =>
-        prev && prev.id === turnId
-          ? {
-              ...prev,
-              status: "error",
-              errorMessage: e instanceof Error ? e.message : "request failed",
-            }
-          : prev,
+      const message = e instanceof Error ? e.message : "request failed";
+      setItems((prev) =>
+        addBubble(prev, { id: aiId, role: "ai", text: "", error: message }),
       );
     }
   };
@@ -163,9 +220,6 @@ export default function App() {
     avatarRef.current?.playGesture(gesture);
     setGestureOpen(false);
   };
-
-  const showUser =
-    turn && turn.user.length > 0 && turn.userSource !== "audio-pending";
 
   return (
     <div className="relative h-screen w-screen overflow-hidden bg-[radial-gradient(ellipse_at_center,_hsl(222_47%_13%)_0%,_hsl(222_84%_5%)_70%)]">
@@ -201,40 +255,48 @@ export default function App() {
         </div>
       )}
 
-      {/* Header */}
-      <header className="pointer-events-none absolute inset-x-0 top-0 flex items-center gap-2 p-4">
-        <h1 className="text-lg font-semibold tracking-tight text-white">
-          hola
-        </h1>
-      </header>
-
-      {/* Latest exchange as chat bubbles above the input bar (one each) */}
-      <div className="pointer-events-none absolute inset-x-0 bottom-28 mx-auto flex max-w-2xl flex-col gap-2 px-4">
-        {showUser && turn && (
-          <div className="flex justify-end">
-            <div className="max-w-[80%] rounded-2xl rounded-br-sm bg-sky-500/90 px-4 py-2 text-sm text-white shadow-lg backdrop-blur">
-              <p className="whitespace-pre-wrap break-words">{turn.user}</p>
-            </div>
+      {/* Chat: a rolling window of message bubbles. Each enters by sliding up
+          from below; the oldest leaves by sliding up and out. */}
+      <div
+        className={`pointer-events-none absolute inset-x-0 ${
+          expanded ? "bottom-24" : "bottom-28"
+        } mx-auto flex max-w-2xl flex-col gap-2 px-4`}
+      >
+        {items.map((b) => (
+          <div
+            key={b.id}
+            className={`flex ${
+              b.role === "user" ? "justify-end" : "justify-start"
+            } duration-300 ${
+              b.leaving
+                ? "animate-out fade-out-0 slide-out-to-top-4 fill-mode-forwards"
+                : "animate-in fade-in-0 slide-in-from-bottom-3"
+            }`}
+          >
+            {b.role === "user" ? (
+              <div className="max-w-[80%] rounded-2xl rounded-br-sm border border-white/15 bg-black/40 px-4 py-2 text-sm text-white shadow-lg backdrop-blur">
+                <p className="whitespace-pre-wrap break-words">{b.text}</p>
+              </div>
+            ) : (
+              <div className="max-w-[80%] rounded-2xl rounded-bl-sm border border-white/15 bg-black/40 px-4 py-2 text-sm leading-relaxed text-white shadow-lg backdrop-blur">
+                {b.text.length > 0 && (
+                  <p className="whitespace-pre-wrap break-words">{b.text}</p>
+                )}
+                {b.error && (
+                  <p className="mt-1 text-xs text-destructive">{b.error}</p>
+                )}
+              </div>
+            )}
           </div>
-        )}
-        {turn && (turn.ai.length > 0 || turn.errorMessage) && (
-          <div className="flex justify-start">
-            <div className="max-w-[80%] rounded-2xl rounded-bl-sm bg-black/55 px-4 py-2 text-sm leading-relaxed text-white shadow-lg backdrop-blur">
-              {turn.ai.length > 0 && (
-                <p className="whitespace-pre-wrap break-words">{turn.ai}</p>
-              )}
-              {turn.errorMessage && (
-                <p className="mt-1 text-xs text-destructive">
-                  {turn.errorMessage}
-                </p>
-              )}
-            </div>
-          </div>
-        )}
+        ))}
       </div>
 
       {!audioSupported && (
-        <div className="pointer-events-none absolute inset-x-0 bottom-28 flex justify-center px-4">
+        <div
+          className={`pointer-events-none absolute inset-x-0 ${
+            expanded ? "bottom-24" : "bottom-28"
+          } flex justify-center px-4`}
+        >
           <div className="rounded-md border border-destructive/40 bg-destructive/15 px-3 py-2 text-xs text-destructive">
             이 브라우저는 Web Audio API를 지원하지 않아 음성 출력이 재생되지
             않습니다.
@@ -242,50 +304,78 @@ export default function App() {
         </div>
       )}
 
-      {/* Input bar */}
-      <form
-        onSubmit={onSubmit}
-        className="absolute inset-x-0 bottom-0 border-t border-white/10 bg-black/30 backdrop-blur"
-      >
-        <div className="mx-auto flex max-w-2xl items-end gap-2 p-3">
-          <Textarea
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={onKeyDown}
-            placeholder="메시지를 입력하거나 마이크 버튼을 누르세요"
-            disabled={busy}
-            rows={1}
-            className="min-h-[44px] resize-none border-white/15 bg-white/5 text-white placeholder:text-white/40"
-          />
-          <Button
-            type="button"
-            variant="outline"
-            size="icon"
-            className="h-11 w-11 shrink-0"
-            title="제스처"
-            onClick={() => setGestureOpen(true)}
-          >
-            <Smile className="h-4 w-4" />
-          </Button>
+      {/* Voice-first input. Collapsed: a hero mic + "..." centered at the bottom.
+          "..." reveals the full bar (text input + gesture + send). */}
+      {!expanded ? (
+        <div className="absolute inset-x-0 bottom-6 flex items-center justify-center">
+          {/* Mic sits dead-centre; the "..." is offset just to its right. */}
           <Recorder
+            size="lg"
             disabled={busy}
             onCaptured={(blob) => void send({ audio: blob })}
           />
           <Button
-            type="submit"
-            disabled={busy || input.trim().length === 0}
+            type="button"
+            variant="ghost"
             size="icon"
-            className="h-11 w-11 shrink-0"
-            title="Send"
+            className="absolute left-1/2 top-1/2 ml-12 h-12 w-12 shrink-0 -translate-y-1/2 rounded-full border border-white/15 bg-black/40 text-white shadow-lg shadow-black/30 backdrop-blur hover:bg-black/55 hover:text-white"
+            onClick={() => setExpanded(true)}
           >
-            {busy ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <Send className="h-4 w-4" />
-            )}
+            <MoreHorizontal className="h-5 w-5" />
           </Button>
         </div>
-      </form>
+      ) : (
+        <form
+          onSubmit={onSubmit}
+          className="absolute inset-x-0 bottom-0 border-t border-white/10 bg-black/30 backdrop-blur"
+        >
+          <div className="mx-auto flex max-w-2xl items-end gap-2 p-3">
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-11 w-11 shrink-0 text-white/60 hover:text-white"
+              onClick={() => setExpanded(false)}
+            >
+              <ChevronDown className="h-4 w-4" />
+            </Button>
+            <Textarea
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={onKeyDown}
+              placeholder="메시지를 입력하거나 마이크 버튼을 누르세요"
+              disabled={busy}
+              rows={1}
+              className="min-h-[44px] resize-none border-white/15 bg-white/5 text-white placeholder:text-white/40"
+            />
+            <Button
+              type="button"
+              variant="outline"
+              size="icon"
+              className="h-11 w-11 shrink-0"
+              onClick={() => setGestureOpen(true)}
+            >
+              <Smile className="h-4 w-4" />
+            </Button>
+            <Recorder
+              disabled={busy}
+              onCaptured={(blob) => void send({ audio: blob })}
+            />
+            <Button
+              type="submit"
+              disabled={busy || input.trim().length === 0}
+              size="icon"
+              className="h-11 w-11 shrink-0"
+            >
+              {busy ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Send className="h-4 w-4" />
+              )}
+            </Button>
+          </div>
+        </form>
+      )}
 
       {/* Gesture modal */}
       {gestureOpen && (
@@ -299,7 +389,6 @@ export default function App() {
           >
             <button
               type="button"
-              title="닫기"
               onClick={() => setGestureOpen(false)}
               className="absolute right-3 top-3 text-white/50 transition-colors hover:text-white"
             >

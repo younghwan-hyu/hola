@@ -6,6 +6,8 @@ import { Button } from "@/components/ui/button";
 interface Props {
   disabled?: boolean;
   onCaptured: (blob: Blob) => void;
+  /** "lg" renders a large round hero mic (primary voice input); default is the bar-sized button. */
+  size?: "default" | "lg";
 }
 
 function pickMimeType(): string | "" {
@@ -18,7 +20,8 @@ function pickMimeType(): string | "" {
   return "";
 }
 
-export function Recorder({ disabled, onCaptured }: Props) {
+export function Recorder({ disabled, onCaptured, size = "default" }: Props) {
+  const isLg = size === "lg";
   const [recording, setRecording] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const recRef = useRef<MediaRecorder | null>(null);
@@ -67,24 +70,39 @@ export function Recorder({ disabled, onCaptured }: Props) {
   };
 
   return (
-    <div className="flex shrink-0 flex-col items-stretch gap-1">
+    <div
+      className={
+        isLg
+          ? "flex flex-col items-center gap-1"
+          : "flex shrink-0 flex-col items-stretch gap-1"
+      }
+    >
       <Button
         type="button"
-        variant={recording ? "destructive" : "outline"}
+        variant={recording ? "destructive" : isLg ? "ghost" : "outline"}
         disabled={disabled && !recording}
         onClick={recording ? stop : start}
         size="icon"
-        className="h-11 w-11 shrink-0"
-        title={recording ? "Stop recording" : "Record"}
+        className={
+          isLg
+            ? recording
+              ? "h-16 w-16 shrink-0 rounded-full shadow-lg shadow-black/30 ring-4 ring-destructive/40"
+              : "h-16 w-16 shrink-0 rounded-full border border-white/15 bg-black/40 text-white shadow-lg shadow-black/30 backdrop-blur hover:bg-black/55 hover:text-white"
+            : "h-11 w-11 shrink-0"
+        }
       >
         {recording ? (
-          <Square className="h-4 w-4" />
+          <Square className={isLg ? "h-6 w-6" : "h-4 w-4"} />
         ) : (
-          <Mic className="h-4 w-4" />
+          <Mic className={isLg ? "h-6 w-6" : "h-4 w-4"} />
         )}
       </Button>
       {error && (
-        <p className="text-[10px] leading-tight text-destructive max-w-[80px]">
+        <p
+          className={`text-[10px] leading-tight text-destructive ${
+            isLg ? "max-w-[160px] text-center" : "max-w-[80px]"
+          }`}
+        >
           {error}
         </p>
       )}
