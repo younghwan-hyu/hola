@@ -33,5 +33,12 @@ export const GESTURES: GestureDef[] = [
 
 /** id → duration lookup, derived from GESTURES, for the render loop. */
 export const GESTURE_DURATION = Object.fromEntries(
-  GESTURES.map((g) => [g.id, g.durationSeconds]),
+  GESTURES.map((g) => [g.id, g.durationSeconds] as const),
 ) as Record<AvatarGesture, number>;
+
+const GESTURE_IDS = new Set<string>(GESTURES.map((g) => g.id));
+
+/** Runtime guard for gesture names arriving from the server (SSE gesture event). */
+export function isAvatarGesture(name: string): name is AvatarGesture {
+  return GESTURE_IDS.has(name);
+}

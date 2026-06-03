@@ -20,7 +20,7 @@ import {
   subscribeChat,
   type ChatEvent,
 } from "@/lib/api";
-import { GESTURES, type AvatarGesture } from "@/lib/gestures";
+import { GESTURES, isAvatarGesture, type AvatarGesture } from "@/lib/gestures";
 import { base64ToArrayBuffer, StreamingPcmPlayer } from "@/lib/audio";
 
 const AVATAR_URL = import.meta.env.VITE_AVATAR_URL ?? "/avatar.vrm";
@@ -81,6 +81,14 @@ export default function App() {
       subscribeChat(
         handle.sessionId,
         (ev: ChatEvent) => {
+          // Gesture commands parsed out of the AI stream: play them on the
+          // avatar. Pure side effect — no chat-turn state to update.
+          if (ev.type === "gesture") {
+            if (isAvatarGesture(ev.name)) {
+              avatarRef.current?.playGesture(ev.name);
+            }
+            return;
+          }
           setTurn((prev) => {
             if (!prev || prev.id !== turnId) return prev;
             switch (ev.type) {

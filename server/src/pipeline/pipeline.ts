@@ -1,6 +1,7 @@
 import type { AiProvider } from "../ai/index.ts";
 import type { SttProvider } from "../stt/index.ts";
 import type { TtsProvider } from "../tts/index.ts";
+import { GestureCommandParser, KNOWN_GESTURES } from "./gesture-parser.ts";
 import { SentenceSplitter } from "./sentence-splitter.ts";
 import type { Session } from "./session.ts";
 
@@ -83,8 +84,39 @@ export async function runPipeline(
       });
     };
 
-    const aiStart = Date.now();
+    // The AI streams spoken text with inline gesture commands ({gesture=NAME}).
+    // Split them: clean text drives ai_delta + TTS, gestures become events.
     let aiAccum = "";
+    let aiTextStarted = false;
+    const gestureParser = new GestureCommandParser();
+    const handleGestures = (names: string[]): void => {
+      for (const name of names) {
+        if (KNOWN_GESTURES.has(name)) {
+          session.emit({ type: "gesture", name });
+        } else {
+          console.warn(`[pipeline] ignoring unknown gesture command: ${name}`);
+        }
+      }
+    };
+    const handleText = (raw: string): void => {
+      // Drop leading whitespace before the first real character so a stripped
+      // leading gesture marker (e.g. "{gesture=...}\n안녕") doesn't leave a blank
+      // line in the displayed/spoken text. Internal whitespace is preserved.
+      let text = raw;
+      if (!aiTextStarted) {
+        text = text.replace(/^\s+/, "");
+        if (!text) return;
+        aiTextStarted = true;
+      }
+      if (!text) return;
+      aiAccum += text;
+      session.emit({ type: "ai_delta", text });
+      for (const sentence of splitter.push(text)) {
+        enqueueTts(sentence);
+      }
+    };
+
+    const aiStart = Date.now();
     let aiTtftReported = false;
     for await (const delta of deps.ai.stream({ prompt: userText })) {
       if (!aiTtftReported) {
@@ -95,16 +127,15 @@ export async function runPipeline(
           ms: Date.now() - aiStart,
         });
       }
-      aiAccum += delta;
-      session.emit({ type: "ai_delta", text: delta });
-      for (const sentence of splitter.push(delta)) {
-        enqueueTts(sentence);
-      }
+      const { text, gestures } = gestureParser.push(delta);
+      handleGestures(gestures);
+      handleText(text);
     }
+    handleText(gestureParser.flush().text);
     const trailing = splitter.flush();
     if (trailing) enqueueTts(trailing);
 
-    session.emit({ type: "ai_complete", text: aiAccum });
+    session.emit({ type: "ai_complete", text: aiAccum.trim() });
     session.emit({
       type: "timing",
       phase: "ai_total",

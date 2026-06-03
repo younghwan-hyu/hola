@@ -6,6 +6,7 @@ export type ChatEvent =
   | { type: "stt"; text: string; source: "audio" | "text" }
   | { type: "ai_delta"; text: string }
   | { type: "ai_complete"; text: string }
+  | { type: "gesture"; name: string }
   | { type: "tts_start"; sentenceIdx: number; text: string }
   | { type: "tts_chunk"; sentenceIdx: number; audio: string } // base64
   | { type: "tts_end"; sentenceIdx: number }
