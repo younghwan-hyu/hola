@@ -1,6 +1,6 @@
 /**
  * Gesture commands the AI may emit inline in its response. The system prompt
- * (AI_SYSTEM_PROMPT) instructs the model to write them as `{gesture=NAME}`.
+ * (../ai/system-prompt.ts) instructs the model to write them as `{gesture=NAME}`.
  *
  * Keep this set in sync with the client registry in web/src/lib/gestures.ts.
  */

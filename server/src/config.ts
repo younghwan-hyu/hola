@@ -1,5 +1,7 @@
 import dotenv from "dotenv";
 
+import { SYSTEM_PROMPT } from "./ai/system-prompt.ts";
+
 dotenv.config();
 
 function required(name: string): string {
@@ -85,8 +87,7 @@ function parseAi(): AiConfig {
   return {
     provider,
     model: required("AI_MODEL"),
-    systemPrompt:
-      optional("AI_SYSTEM_PROMPT") ?? "You are a helpful assistant.",
+    systemPrompt: SYSTEM_PROMPT,
     openaiReasoning: optional("AI_OPENAI_REASONING"),
     anthropicThinkingBudget: optionalInt("AI_ANTHROPIC_THINKING_BUDGET"),
   };
