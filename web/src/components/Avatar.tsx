@@ -86,7 +86,7 @@ const SUN_FALLBACK_POS = new THREE.Vector3(0, 1.08, 0.45); // used before the VR
 const SUN_SPIN_SPEED = 0.6; // slow pinwheel spin about the view axis (rad/s)
 const SUN_BOB = 0.04; // vertical float amplitude (m)
 const SUN_BOB_SPEED = 1.5; // float speed (rad/s)
-const SUN_LIGHT_INTENSITY = 3; // warm point light cast on the avatar at full shine
+const SUN_LIGHT_INTENSITY = 1; // warm point light cast on the avatar at full shine
 
 /** Trapezoid envelope: ramp up, hold at 1, ramp down. */
 function envelope(t: number, dur: number, rise: number, fall: number): number {
