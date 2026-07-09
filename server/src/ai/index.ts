@@ -17,4 +17,4 @@ export function createAiProvider(
   }
 }
 
-export type { AiProvider, AiInput } from "./types.ts";
+export type { AiProvider, AiInput, AiSession } from "./types.ts";

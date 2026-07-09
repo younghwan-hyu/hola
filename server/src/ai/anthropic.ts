@@ -1,8 +1,15 @@
+import { randomUUID } from "node:crypto";
+
 import Anthropic from "@anthropic-ai/sdk";
 
 import type { AiConfig } from "../config.ts";
 import { MAX_TOOL_STEPS, callTool, type Tool } from "../tools/index.ts";
-import type { AiInput, AiProvider } from "./types.ts";
+import type { AiInput, AiProvider, AiSession } from "./types.ts";
+
+interface AnthropicSession extends AiSession {
+  key: string;
+  history: Anthropic.MessageParam[];
+}
 
 export function createAnthropicProvider(
   apiKey: string,
@@ -22,6 +29,9 @@ export function createAnthropicProvider(
 
   return {
     name: "anthropic",
+    createSession(): AnthropicSession {
+      return { key: randomUUID(), history: [] };
+    },
     async warmup(): Promise<void> {
       // SDK 0.32.x has no models.list / countTokens — cheapest warm path is a
       // 1-token messages.create (~$0.0001 per startup).
@@ -31,8 +41,14 @@ export function createAnthropicProvider(
         messages: [{ role: "user", content: "." }],
       });
     },
-    async *stream({ prompt }: AiInput): AsyncIterable<string> {
+    async *stream(
+      { prompt }: AiInput,
+      session: AiSession,
+    ): AsyncIterable<string> {
+      // `session` is always one this provider issued via createSession().
+      const s = session as AnthropicSession;
       const messages: Anthropic.MessageParam[] = [
+        ...s.history,
         { role: "user", content: prompt },
       ];
 
@@ -66,7 +82,11 @@ export function createAnthropicProvider(
         }
 
         const final = await stream.finalMessage();
-        if (final.stop_reason !== "tool_use") return;
+        if (final.stop_reason !== "tool_use") {
+          // Final answer: record the assistant turn so the session remembers it.
+          messages.push({ role: "assistant", content: final.content });
+          break;
+        }
 
         // Echo the assistant turn back verbatim (preserves any thinking blocks),
         // then answer every tool_use block with a tool_result.
@@ -84,6 +104,10 @@ export function createAnthropicProvider(
         }
         messages.push({ role: "user", content: toolResults });
       }
+
+      // Persist the full conversation so the next call continues it. (System is
+      // a top-level param on Anthropic, so it never lives in `messages`.)
+      s.history = messages;
     },
   };
 }

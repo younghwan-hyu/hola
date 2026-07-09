@@ -1,4 +1,4 @@
-import type { AiProvider } from "../ai/index.ts";
+import type { AiProvider, AiSession } from "../ai/index.ts";
 import type { SttProvider } from "../stt/index.ts";
 import type { TtsProvider } from "../tts/index.ts";
 import { GestureCommandParser, KNOWN_GESTURES } from "./gesture-parser.ts";
@@ -8,6 +8,7 @@ import type { Session } from "./session.ts";
 export interface PipelineDeps {
   stt: SttProvider;
   ai: AiProvider;
+  aiSession: AiSession;
   tts: TtsProvider;
   sentenceBoundaryChars: string;
 }
@@ -118,7 +119,10 @@ export async function runPipeline(
 
     const aiStart = Date.now();
     let aiTtftReported = false;
-    for await (const delta of deps.ai.stream({ prompt: userText })) {
+    for await (const delta of deps.ai.stream(
+      { prompt: userText },
+      deps.aiSession,
+    )) {
       if (!aiTtftReported) {
         aiTtftReported = true;
         session.emit({

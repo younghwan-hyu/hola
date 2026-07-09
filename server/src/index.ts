@@ -17,6 +17,10 @@ const ai = createAiProvider(
 );
 const tts = createTtsProvider(config.tts);
 
+// Issue one conversation session at startup; every AI call reuses it so the
+// avatar keeps context across turns for the server's lifetime.
+const aiSession = ai.createSession();
+
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
@@ -31,7 +35,7 @@ app.get("/api/health", (_req, res) => {
   });
 });
 
-app.use("/api", createChatRouter({ config, stt, ai, tts }));
+app.use("/api", createChatRouter({ config, stt, ai, aiSession, tts }));
 
 app.listen(config.port, () => {
   console.log(`[hola] listening on :${config.port}`);
@@ -39,6 +43,7 @@ app.listen(config.port, () => {
     `[hola] stt=${config.stt.provider}/${config.stt.model} ai=${config.ai.provider}/${config.ai.model} tts=${config.tts.provider}/${config.tts.voice}`,
   );
   console.log(`[hola] tools=[${tools.map((t) => t.name).join(", ")}]`);
+  console.log(`[hola] ai session issued: ${aiSession.key}`);
 
   // Warm clients in parallel — don't block listen, log per-provider failure.
   const warmupStart = Date.now();

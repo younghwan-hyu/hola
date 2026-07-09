@@ -2,7 +2,7 @@ import { Router } from "express";
 import multer from "multer";
 
 import type { Config } from "../config.ts";
-import type { AiProvider } from "../ai/index.ts";
+import type { AiProvider, AiSession } from "../ai/index.ts";
 import type { SttProvider } from "../stt/index.ts";
 import type { TtsProvider } from "../tts/index.ts";
 import { runPipeline } from "../pipeline/pipeline.ts";
@@ -13,6 +13,7 @@ interface Deps {
   config: Config;
   stt: SttProvider;
   ai: AiProvider;
+  aiSession: AiSession;
   tts: TtsProvider;
 }
 
@@ -60,6 +61,7 @@ export function createChatRouter(deps: Deps): Router {
       {
         stt: deps.stt,
         ai: deps.ai,
+        aiSession: deps.aiSession,
         tts: deps.tts,
         sentenceBoundaryChars: deps.config.sentenceBoundaryChars,
       },

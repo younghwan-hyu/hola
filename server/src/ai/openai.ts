@@ -1,8 +1,15 @@
+import { randomUUID } from "node:crypto";
+
 import OpenAI from "openai";
 
 import type { AiConfig } from "../config.ts";
 import { MAX_TOOL_STEPS, callTool, type Tool } from "../tools/index.ts";
-import type { AiInput, AiProvider } from "./types.ts";
+import type { AiInput, AiProvider, AiSession } from "./types.ts";
+
+interface OpenAiSession extends AiSession {
+  key: string;
+  history: OpenAI.Chat.ChatCompletionMessageParam[];
+}
 
 export function createOpenAiProvider(
   apiKey: string,
@@ -25,12 +32,21 @@ export function createOpenAiProvider(
 
   return {
     name: "openai",
+    createSession(): OpenAiSession {
+      return { key: randomUUID(), history: [] };
+    },
     async warmup(): Promise<void> {
       await client.models.list();
     },
-    async *stream({ prompt }: AiInput): AsyncIterable<string> {
+    async *stream(
+      { prompt }: AiInput,
+      session: AiSession,
+    ): AsyncIterable<string> {
+      // `session` is always one this provider issued via createSession().
+      const s = session as OpenAiSession;
       const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
         { role: "system", content: cfg.systemPrompt },
+        ...s.history,
         { role: "user", content: prompt },
       ];
 
@@ -69,7 +85,11 @@ export function createOpenAiProvider(
         }
 
         const toolCalls = calls.filter((c) => c && c.id && c.name);
-        if (finishReason !== "tool_calls" || toolCalls.length === 0) return;
+        if (finishReason !== "tool_calls" || toolCalls.length === 0) {
+          // Final answer: record the assistant turn so the session remembers it.
+          if (content.length > 0) messages.push({ role: "assistant", content });
+          break;
+        }
 
         // Record the assistant turn that requested the tools...
         messages.push({
@@ -103,6 +123,10 @@ export function createOpenAiProvider(
           });
         }
       }
+
+      // Persist the turn (everything after the system message) so the next call
+      // continues the same conversation. System is re-prepended on each call.
+      s.history = messages.slice(1);
     },
   };
 }
