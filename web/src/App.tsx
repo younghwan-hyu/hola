@@ -103,9 +103,7 @@ export default function App() {
     try {
       const r = await uploadDocument(file);
       flashUploadMsg(
-        r.skipped
-          ? `${r.filename} — 이미 저장된 문서입니다`
-          : `${r.filename} · ${r.chunks}개 청크 저장됨`,
+        r.skipped ? `${r.filename} 이미 저장됨` : `${r.filename} 저장됨`,
       );
     } catch (e) {
       flashUploadMsg(
@@ -359,11 +357,21 @@ export default function App() {
         </div>
       )}
 
-      {/* Voice-first input. Collapsed: a hero mic + "..." centered at the bottom.
+      {/* Voice-first input. Collapsed: mic + file upload + "..." in a row.
           "..." reveals the full bar (text input + gesture + send). */}
       {!expanded ? (
-        <div className="absolute inset-x-0 bottom-6 flex items-center justify-center">
-          {/* Mic sits dead-centre; the "..." is offset just to its right. */}
+        <div className="absolute inset-x-0 bottom-6 flex items-center justify-center gap-4">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".txt,.md,.markdown,text/plain,text/markdown"
+            className="hidden"
+            onChange={(e) => {
+              void onFilePicked(e.target.files?.[0]);
+              e.target.value = "";
+            }}
+          />
+          {/* Order: 음성(mic) - 파일(upload) - ...(more). */}
           <Recorder
             size="lg"
             disabled={busy}
@@ -373,7 +381,22 @@ export default function App() {
             type="button"
             variant="ghost"
             size="icon"
-            className="absolute left-1/2 top-1/2 ml-12 h-12 w-12 shrink-0 -translate-y-1/2 rounded-full border border-white/15 bg-black/40 text-white shadow-lg shadow-black/30 backdrop-blur hover:bg-black/55 hover:text-white"
+            disabled={uploading}
+            title="문서 업로드"
+            className="h-16 w-16 shrink-0 rounded-full border border-white/15 bg-black/40 text-white shadow-lg shadow-black/30 backdrop-blur hover:bg-black/55 hover:text-white"
+            onClick={() => fileInputRef.current?.click()}
+          >
+            {uploading ? (
+              <Loader2 className="h-6 w-6 animate-spin" />
+            ) : (
+              <FileUp className="h-6 w-6" />
+            )}
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="h-12 w-12 shrink-0 rounded-full border border-white/15 bg-black/40 text-white shadow-lg shadow-black/30 backdrop-blur hover:bg-black/55 hover:text-white"
             onClick={() => setExpanded(true)}
           >
             <MoreHorizontal className="h-5 w-5" />
@@ -403,31 +426,6 @@ export default function App() {
               rows={1}
               className="min-h-[44px] resize-none border-white/15 bg-white/5 text-white placeholder:text-white/40"
             />
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".txt,.md,.markdown,text/plain,text/markdown"
-              className="hidden"
-              onChange={(e) => {
-                void onFilePicked(e.target.files?.[0]);
-                e.target.value = "";
-              }}
-            />
-            <Button
-              type="button"
-              variant="outline"
-              size="icon"
-              className="h-11 w-11 shrink-0"
-              disabled={uploading}
-              title="문서 업로드"
-              onClick={() => fileInputRef.current?.click()}
-            >
-              {uploading ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <FileUp className="h-4 w-4" />
-              )}
-            </Button>
             <Button
               type="button"
               variant="outline"
