@@ -1,5 +1,12 @@
 export interface AiInput {
   prompt: string;
+  /**
+   * Optional image captured from the user's camera this turn. Passed to the
+   * model as a multimodal user message. The provider keeps only the most recent
+   * image in history (older ones are replaced with a placeholder) since the full
+   * history is re-sent on every call.
+   */
+  image?: { bytes: Buffer; mimeType: string };
 }
 
 /**

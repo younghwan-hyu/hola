@@ -29,6 +29,7 @@ export async function fetchHealth(): Promise<HealthInfo> {
 export async function startChat(input: {
   text?: string;
   audio?: Blob;
+  image?: Blob;
 }): Promise<ChatHandle> {
   const fd = new FormData();
   if (input.text !== undefined) fd.append("text", input.text);
@@ -36,6 +37,7 @@ export async function startChat(input: {
     const ext = input.audio.type.includes("ogg") ? "ogg" : "webm";
     fd.append("audio", input.audio, `audio.${ext}`);
   }
+  if (input.image) fd.append("image", input.image, "camera.jpg");
   const res = await fetch("/api/chat", { method: "POST", body: fd });
   if (!res.ok) {
     throw new Error(

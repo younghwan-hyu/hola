@@ -16,6 +16,8 @@ export interface PipelineDeps {
 export interface PipelineInput {
   text?: string;
   audio?: { bytes: Buffer; mimeType?: string };
+  /** Optional camera frame to send alongside this turn (see AiInput.image). */
+  image?: { bytes: Buffer; mimeType: string };
 }
 
 /**
@@ -120,7 +122,7 @@ export async function runPipeline(
     const aiStart = Date.now();
     let aiTtftReported = false;
     for await (const delta of deps.ai.stream(
-      { prompt: userText },
+      { prompt: userText, image: input.image },
       deps.aiSession,
     )) {
       if (!aiTtftReported) {

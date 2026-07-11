@@ -11,6 +11,40 @@ interface OpenAiSession extends AiSession {
   history: OpenAI.Chat.ChatCompletionMessageParam[];
 }
 
+/** Placeholder swapped in for an evicted (stale) camera image in history. */
+const IMG_PLACEHOLDER = "[이전 카메라 캡처 — 생략됨]";
+
+/**
+ * Return a copy of `history` keeping at most the single most recent camera image
+ * (0 if this turn already carries a fresh image); older image parts become a
+ * text placeholder so re-sending the full history doesn't resend stale base64
+ * frames. Works on a shallow copy (cloning only the user messages it edits) so
+ * the live session history is never mutated — a turn that throws before it
+ * commits must leave the previously retained image intact.
+ */
+function pruneOpenAiImages(
+  history: OpenAI.Chat.ChatCompletionMessageParam[],
+  currentTurnHasImage: boolean,
+): OpenAI.Chat.ChatCompletionMessageParam[] {
+  const copy = history.map((msg) =>
+    msg.role === "user" && Array.isArray(msg.content)
+      ? { ...msg, content: [...msg.content] }
+      : msg,
+  );
+  let budget = currentTurnHasImage ? 0 : 1;
+  for (let i = copy.length - 1; i >= 0; i--) {
+    const msg = copy[i];
+    if (!msg || msg.role !== "user" || !Array.isArray(msg.content)) continue;
+    for (let j = msg.content.length - 1; j >= 0; j--) {
+      const part = msg.content[j];
+      if (!part || part.type !== "image_url") continue;
+      if (budget > 0) budget--;
+      else msg.content[j] = { type: "text", text: IMG_PLACEHOLDER };
+    }
+  }
+  return copy;
+}
+
 export function createOpenAiProvider(
   apiKey: string,
   cfg: AiConfig,
@@ -39,15 +73,31 @@ export function createOpenAiProvider(
       await client.models.list();
     },
     async *stream(
-      { prompt }: AiInput,
+      { prompt, image }: AiInput,
       session: AiSession,
     ): AsyncIterable<string> {
       // `session` is always one this provider issued via createSession().
       const s = session as OpenAiSession;
+      // Evict stale images from a COPY of history (committed only on success).
+      const history = pruneOpenAiImages(s.history, image !== undefined);
+      const userMessage: OpenAI.Chat.ChatCompletionMessageParam = image
+        ? {
+            role: "user",
+            content: [
+              { type: "text", text: prompt },
+              {
+                type: "image_url",
+                image_url: {
+                  url: `data:${image.mimeType};base64,${image.bytes.toString("base64")}`,
+                },
+              },
+            ],
+          }
+        : { role: "user", content: prompt };
       const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
         { role: "system", content: cfg.systemPrompt },
-        ...s.history,
-        { role: "user", content: prompt },
+        ...history,
+        userMessage,
       ];
 
       // Agentic loop: stream text, and whenever the model emits tool calls,

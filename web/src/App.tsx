@@ -6,12 +6,14 @@ import {
   type KeyboardEvent,
 } from "react";
 import {
+  Camera,
   ChevronDown,
   FileUp,
   Loader2,
   MoreHorizontal,
   Send,
   Smile,
+  SwitchCamera,
   X,
 } from "lucide-react";
 
@@ -41,6 +43,8 @@ interface Bubble {
   role: Role;
   text: string;
   error?: string;
+  /** Object URL of the camera frame sent with this turn, shown as a thumbnail. */
+  imageUrl?: string;
   /** true while the bubble is sliding up and out, just before removal. */
   leaving?: boolean;
 }
@@ -76,37 +80,49 @@ export default function App() {
   // Chat as a rolling window of at most MAX_BUBBLES message bubbles (user & ai).
   const [items, setItems] = useState<Bubble[]>([]);
   const [gestureOpen, setGestureOpen] = useState(false);
-  // Input is voice-first: collapsed shows only a hero mic + "..."; expanding
-  // reveals the full bar (text input + gesture button).
+  // Input is voice-first: collapsed shows a row of mic + file + camera + "...";
+  // expanding reveals the full bar (text input + gesture + send).
   const [expanded, setExpanded] = useState(false);
   // Document upload (RAG) is independent of the chat `busy` state.
   const [uploading, setUploading] = useState(false);
-  const [uploadMsg, setUploadMsg] = useState<string | null>(null);
+  const [toastMsg, setToastMsg] = useState<string | null>(null);
+  // Camera: when on, a live preview shows and each sent turn attaches a frame.
+  const [cameraOn, setCameraOn] = useState(false);
+  const [facingMode, setFacingMode] = useState<"user" | "environment">("user");
+  // Number of video inputs (known after permission); the front/back switch is
+  // only shown when there are 2+ (e.g. phones, not a single-webcam PC).
+  const [videoInputCount, setVideoInputCount] = useState(0);
 
   const playerRef = useRef<StreamingPcmPlayer>(new StreamingPcmPlayer());
   const avatarRef = useRef<AvatarHandle>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const uploadMsgTimer = useRef<number | null>(null);
+  const cameraStreamRef = useRef<MediaStream | null>(null);
+  const cameraVideoRef = useRef<HTMLVideoElement | null>(null);
+  const cameraStartingRef = useRef(false);
+  const mountedRef = useRef(true);
+  // Live object URLs for sent-image thumbnails, revoked when their bubble leaves.
+  const objectUrls = useRef<Set<string>>(new Set());
+  const toastTimer = useRef<number | null>(null);
   const leavingTimers = useRef<Map<string, number>>(new Map());
 
-  const flashUploadMsg = (msg: string) => {
-    setUploadMsg(msg);
-    if (uploadMsgTimer.current !== null)
-      window.clearTimeout(uploadMsgTimer.current);
-    uploadMsgTimer.current = window.setTimeout(() => setUploadMsg(null), 4000);
+  const flashToast = (msg: string) => {
+    setToastMsg(msg);
+    if (toastTimer.current !== null)
+      window.clearTimeout(toastTimer.current);
+    toastTimer.current = window.setTimeout(() => setToastMsg(null), 4000);
   };
 
   const onFilePicked = async (file: File | undefined) => {
     if (!file || uploading) return;
     setUploading(true);
-    setUploadMsg(null);
+    setToastMsg(null);
     try {
       const r = await uploadDocument(file);
-      flashUploadMsg(
+      flashToast(
         r.skipped ? `${r.filename} 이미 저장됨` : `${r.filename} 저장됨`,
       );
     } catch (e) {
-      flashUploadMsg(
+      flashToast(
         `업로드 실패: ${e instanceof Error ? e.message : "unknown"}`,
       );
     } finally {
@@ -114,15 +130,128 @@ export default function App() {
     }
   };
 
+  const stopCamera = () => {
+    const stream = cameraStreamRef.current;
+    if (stream) for (const t of stream.getTracks()) t.stop();
+    cameraStreamRef.current = null;
+    if (cameraVideoRef.current) cameraVideoRef.current.srcObject = null;
+  };
+
+  const startStream = (mode: "user" | "environment") =>
+    navigator.mediaDevices.getUserMedia({
+      video: { facingMode: mode, width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false,
+    });
+
+  const toggleCamera = async () => {
+    if (cameraOn) {
+      stopCamera();
+      setCameraOn(false);
+      return;
+    }
+    // Guard the async start: a second click (or a click while already on) must
+    // not open a second MediaStream that would leak the camera.
+    if (cameraStartingRef.current || cameraStreamRef.current) return;
+    cameraStartingRef.current = true;
+    try {
+      const stream = await startStream(facingMode);
+      // If we unmounted while the prompt was open, release the stream now.
+      if (!mountedRef.current) {
+        for (const t of stream.getTracks()) t.stop();
+        return;
+      }
+      cameraStreamRef.current = stream;
+      setCameraOn(true); // preview <video> mounts, then an effect binds the stream
+      // Now that permission is granted, count cameras to decide whether to show
+      // the front/back switch (labels/count are only reliable post-permission).
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        setVideoInputCount(
+          devices.filter((d) => d.kind === "videoinput").length,
+        );
+      } catch {
+        /* enumerateDevices unsupported — leave the switch hidden */
+      }
+    } catch (e) {
+      stopCamera();
+      setCameraOn(false);
+      flashToast(
+        `카메라를 켤 수 없습니다: ${e instanceof Error ? e.message : "권한 거부"}`,
+      );
+    } finally {
+      cameraStartingRef.current = false;
+    }
+  };
+
+  // Flip between front ("user") and back ("environment") cameras. Only reachable
+  // from the switch button, which is shown when 2+ video inputs exist.
+  const switchCamera = async () => {
+    if (cameraStartingRef.current || !cameraStreamRef.current) return;
+    const next = facingMode === "user" ? "environment" : "user";
+    cameraStartingRef.current = true;
+    try {
+      const stream = await startStream(next);
+      if (!mountedRef.current) {
+        for (const t of stream.getTracks()) t.stop();
+        return;
+      }
+      const old = cameraStreamRef.current;
+      if (old) for (const t of old.getTracks()) t.stop();
+      cameraStreamRef.current = stream;
+      if (cameraVideoRef.current) cameraVideoRef.current.srcObject = stream;
+      setFacingMode(next);
+    } catch (e) {
+      flashToast(
+        `카메라 전환 실패: ${e instanceof Error ? e.message : "unknown"}`,
+      );
+    } finally {
+      cameraStartingRef.current = false;
+    }
+  };
+
+  // Capture the current preview frame as a downscaled JPEG (long edge 1024px).
+  // Not mirrored — the model gets the real scene. null if the video isn't ready.
+  const captureFrame = async (): Promise<Blob | null> => {
+    const video = cameraVideoRef.current;
+    if (!video || video.readyState < 2 || video.videoWidth === 0) return null;
+    const scale = Math.min(
+      1,
+      1024 / Math.max(video.videoWidth, video.videoHeight),
+    );
+    const w = Math.round(video.videoWidth * scale);
+    const h = Math.round(video.videoHeight * scale);
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    ctx.drawImage(video, 0, 0, w, h);
+    return await new Promise((resolve) =>
+      canvas.toBlob((b) => resolve(b), "image/jpeg", 0.8),
+    );
+  };
+
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
+      mountedRef.current = false;
       playerRef.current.dispose();
       for (const t of leavingTimers.current.values()) window.clearTimeout(t);
       leavingTimers.current.clear();
-      if (uploadMsgTimer.current !== null)
-        window.clearTimeout(uploadMsgTimer.current);
+      if (toastTimer.current !== null) window.clearTimeout(toastTimer.current);
+      const stream = cameraStreamRef.current;
+      if (stream) for (const t of stream.getTracks()) t.stop();
+      for (const u of objectUrls.current) URL.revokeObjectURL(u);
+      objectUrls.current.clear();
     };
   }, []);
+
+  // Bind the camera stream to the preview <video> once it has mounted.
+  useEffect(() => {
+    if (cameraOn && cameraVideoRef.current && cameraStreamRef.current) {
+      cameraVideoRef.current.srcObject = cameraStreamRef.current;
+    }
+  }, [cameraOn]);
 
   // Remove each leaving bubble after its exit animation. Scheduled exactly once
   // per bubble (guarded by the ref) so streaming re-renders don't reset it.
@@ -131,6 +260,10 @@ export default function App() {
       if (b.leaving && !leavingTimers.current.has(b.id)) {
         const timer = window.setTimeout(() => {
           leavingTimers.current.delete(b.id);
+          if (b.imageUrl) {
+            URL.revokeObjectURL(b.imageUrl);
+            objectUrls.current.delete(b.imageUrl);
+          }
           setItems((prev) => prev.filter((x) => x.id !== b.id));
         }, EXIT_MS);
         leavingTimers.current.set(b.id, timer);
@@ -146,14 +279,27 @@ export default function App() {
     const aiId = `${turnId}:a`;
     const player = playerRef.current;
 
+    // Camera on: capture a fresh frame first so the user bubble can show it as a
+    // thumbnail. A failed capture must not block the message.
+    const image = cameraOn
+      ? ((await captureFrame().catch(() => null)) ?? undefined)
+      : undefined;
+    let imageUrl: string | undefined;
+    if (image) {
+      imageUrl = URL.createObjectURL(image);
+      objectUrls.current.add(imageUrl);
+    }
+
     // Text input: the user message is known now (audio: added on the stt event).
     if (payload.text && payload.text.length > 0) {
       const text = payload.text;
-      setItems((prev) => addBubble(prev, { id: userId, role: "user", text }));
+      setItems((prev) =>
+        addBubble(prev, { id: userId, role: "user", text, imageUrl }),
+      );
     }
 
     try {
-      const handle = await startChat(payload);
+      const handle = await startChat({ ...payload, image });
 
       if (audioSupported && handle.config.audio.encoding === "PCM") {
         player.configure({
@@ -201,7 +347,12 @@ export default function App() {
               // For audio, the user bubble appears once the transcript is known.
               if (ev.source === "audio") {
                 setItems((prev) =>
-                  addBubble(prev, { id: userId, role: "user", text: ev.text }),
+                  addBubble(prev, {
+                    id: userId,
+                    role: "user",
+                    text: ev.text,
+                    imageUrl,
+                  }),
                 );
               }
               return;
@@ -316,7 +467,16 @@ export default function App() {
           >
             {b.role === "user" ? (
               <div className="max-w-[80%] rounded-2xl rounded-br-sm border border-white/15 bg-black/40 px-4 py-2 text-sm text-white shadow-lg backdrop-blur">
-                <p className="whitespace-pre-wrap break-words">{b.text}</p>
+                {b.imageUrl && (
+                  <img
+                    src={b.imageUrl}
+                    alt="첨부한 카메라 이미지"
+                    className="mb-1.5 max-h-24 w-auto rounded-lg object-cover"
+                  />
+                )}
+                {b.text.length > 0 && (
+                  <p className="whitespace-pre-wrap break-words">{b.text}</p>
+                )}
               </div>
             ) : (
               <div className="max-w-[80%] rounded-2xl rounded-bl-sm border border-white/15 bg-black/40 px-4 py-2 text-sm leading-relaxed text-white shadow-lg backdrop-blur">
@@ -332,14 +492,14 @@ export default function App() {
         ))}
       </div>
 
-      {uploadMsg && (
+      {toastMsg && (
         <div
           className={`pointer-events-none absolute inset-x-0 ${
             expanded ? "bottom-40" : "bottom-44"
           } flex justify-center px-4`}
         >
           <div className="animate-in fade-in-0 slide-in-from-bottom-2 rounded-full border border-white/15 bg-black/50 px-4 py-2 text-xs text-white/90 shadow-lg backdrop-blur">
-            {uploadMsg}
+            {toastMsg}
           </div>
         </div>
       )}
@@ -357,7 +517,40 @@ export default function App() {
         </div>
       )}
 
-      {/* Voice-first input. Collapsed: mic + file upload + "..." in a row.
+      {/* Live camera preview, top-right while the camera is on. Front camera is
+          mirrored (selfie), back camera is not. Toggle off with the camera
+          button. Captured frames are always un-mirrored (see captureFrame). */}
+      {cameraOn && (
+        <div className="absolute right-4 top-4 z-[5] flex w-52 flex-col items-center gap-2">
+          <div className="w-full overflow-hidden rounded-xl border border-white/20 shadow-lg shadow-black/40">
+            <video
+              ref={cameraVideoRef}
+              autoPlay
+              muted
+              playsInline
+              className={`aspect-video w-full object-cover ${
+                facingMode === "user" ? "-scale-x-100" : ""
+              }`}
+            />
+          </div>
+          {/* Front/back switch — only when the device has 2+ cameras (phones). */}
+          {videoInputCount >= 2 && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              title="전/후면 카메라 전환"
+              onClick={() => void switchCamera()}
+              className="h-8 gap-1.5 rounded-full border border-white/15 bg-black/50 px-3 text-xs text-white shadow-lg backdrop-blur hover:bg-black/70 hover:text-white"
+            >
+              <SwitchCamera className="h-3.5 w-3.5" />
+              전환
+            </Button>
+          )}
+        </div>
+      )}
+
+      {/* Voice-first input. Collapsed: mic + file upload + camera + "..." in a row.
           "..." reveals the full bar (text input + gesture + send). */}
       {!expanded ? (
         <div className="absolute inset-x-0 bottom-6 flex items-center justify-center gap-4">
@@ -371,7 +564,7 @@ export default function App() {
               e.target.value = "";
             }}
           />
-          {/* Order: 음성(mic) - 파일(upload) - ...(more). */}
+          {/* Order: 음성(mic) - 파일(upload) - 카메라(camera) - ...(more). */}
           <Recorder
             size="lg"
             disabled={busy}
@@ -391,6 +584,20 @@ export default function App() {
             ) : (
               <FileUp className="h-6 w-6" />
             )}
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            title={cameraOn ? "카메라 끄기" : "카메라 켜기"}
+            className={
+              cameraOn
+                ? "h-16 w-16 shrink-0 rounded-full bg-white text-black shadow-lg shadow-black/30 hover:bg-white/90 hover:text-black"
+                : "h-16 w-16 shrink-0 rounded-full border border-white/15 bg-black/40 text-white shadow-lg shadow-black/30 backdrop-blur hover:bg-black/55 hover:text-white"
+            }
+            onClick={() => void toggleCamera()}
+          >
+            <Camera className="h-6 w-6" />
           </Button>
           <Button
             type="button"

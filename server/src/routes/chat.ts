@@ -17,56 +17,96 @@ interface Deps {
   tts: TtsProvider;
 }
 
+/** Image MIME types accepted for camera frames (aligns with Anthropic media_type). */
+const ALLOWED_IMAGE_TYPES = [
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "image/webp",
+];
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024; // 8MB cap on camera frames.
+
 export function createChatRouter(deps: Deps): Router {
   const router = Router();
   const registry = new SessionRegistry();
   const upload = multer({
     storage: multer.memoryStorage(),
-    limits: { fileSize: 25 * 1024 * 1024 }, // 25MB cap on audio uploads.
+    limits: { fileSize: 25 * 1024 * 1024 }, // 25MB cap on uploads.
   });
 
-  router.post("/chat", upload.single("audio"), (req, res) => {
-    const text = typeof req.body?.text === "string" ? req.body.text : undefined;
-    const file = req.file;
+  router.post(
+    "/chat",
+    upload.fields([
+      { name: "audio", maxCount: 1 },
+      { name: "image", maxCount: 1 },
+    ]),
+    (req, res) => {
+      const text =
+        typeof req.body?.text === "string" ? req.body.text : undefined;
+      const files = req.files as
+        | Record<string, Express.Multer.File[]>
+        | undefined;
+      const file = files?.audio?.[0];
+      const image = files?.image?.[0];
 
-    if (!text && !file) {
-      res.status(400).json({ error: "either `text` or `audio` is required" });
-      return;
-    }
+      if (!text && !file) {
+        res.status(400).json({ error: "either `text` or `audio` is required" });
+        return;
+      }
 
-    const session = registry.create();
-    res.status(202).json({
-      session_id: session.id,
-      config: {
-        stt: deps.config.stt,
-        ai: { provider: deps.config.ai.provider, model: deps.config.ai.model },
-        tts: deps.config.tts,
-        audio: {
-          encoding: deps.config.tts.audioEncoding,
-          sampleRateHertz: deps.config.tts.sampleRateHertz,
-          channels: 1,
-          bitsPerSample: 16,
+      if (image) {
+        if (!ALLOWED_IMAGE_TYPES.includes(image.mimetype)) {
+          res
+            .status(400)
+            .json({ error: `unsupported image type: ${image.mimetype}` });
+          return;
+        }
+        if (image.size > MAX_IMAGE_BYTES) {
+          res.status(400).json({ error: "image too large (max 8MB)" });
+          return;
+        }
+      }
+
+      const session = registry.create();
+      res.status(202).json({
+        session_id: session.id,
+        config: {
+          stt: deps.config.stt,
+          ai: {
+            provider: deps.config.ai.provider,
+            model: deps.config.ai.model,
+          },
+          tts: deps.config.tts,
+          audio: {
+            encoding: deps.config.tts.audioEncoding,
+            sampleRateHertz: deps.config.tts.sampleRateHertz,
+            channels: 1,
+            bitsPerSample: 16,
+          },
         },
-      },
-    });
+      });
 
-    void runPipeline(
-      session,
-      {
-        text,
-        audio: file
-          ? { bytes: file.buffer, mimeType: file.mimetype }
-          : undefined,
-      },
-      {
-        stt: deps.stt,
-        ai: deps.ai,
-        aiSession: deps.aiSession,
-        tts: deps.tts,
-        sentenceBoundaryChars: deps.config.sentenceBoundaryChars,
-      },
-    );
-  });
+      void runPipeline(
+        session,
+        {
+          text,
+          audio: file
+            ? { bytes: file.buffer, mimeType: file.mimetype }
+            : undefined,
+          image: image
+            ? { bytes: image.buffer, mimeType: image.mimetype }
+            : undefined,
+        },
+        {
+          stt: deps.stt,
+          ai: deps.ai,
+          aiSession: deps.aiSession,
+          tts: deps.tts,
+          sentenceBoundaryChars: deps.config.sentenceBoundaryChars,
+        },
+      );
+    },
+  );
 
   router.get("/chat/:id", (req, res) => {
     const session = registry.take(req.params.id);

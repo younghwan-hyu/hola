@@ -18,6 +18,7 @@
 - **TTS**: streaming, 문장 단위로 순차 재생 (기본 PCM 24kHz int16 LE)
 - **제스처**: AI 응답에 섞인 `{gesture=NAME}` 커맨드를 서버가 파싱해 음성 텍스트와 분리, `gesture` 이벤트로 전송 → 브라우저가 아바타 제스처 재생 (아래 [제스처 커맨드](#제스처-커맨드))
 - **RAG(문서 검색)**: 업로드한 텍스트 문서를 로컬 임베딩(pgvector)으로 저장하고, AI가 `search_documents` 도구로 검색해 답변 근거로 활용 (아래 [RAG](#rag-문서-검색))
+- **카메라 비전**: 카메라를 켜면 대화 전송(텍스트·음성) 시 현재 프레임을 캡처해 이미지와 함께 전송, AI가 실시간 장면을 인식 (아래 [카메라 비전](#카메라-비전))
 
 > ⚠️ TTS 포맷은 기본값 **PCM** 입니다. Google streaming TTS는 OGG_OPUS도 지원하지만 Chrome의 MSE byte stream에는 OGG 컨테이너가 없어 청크 append가 안 됩니다. PCM이면 `AudioBufferSourceNode`로 청크별 스케줄링이 깔끔하게 됩니다. 대역폭이 중요한 경우 `TTS_AUDIO_ENCODING=OGG_OPUS`로 바꾸고 클라이언트에 wasm Opus 디코더를 붙이면 됩니다.
 
@@ -116,9 +117,10 @@ cd web && npm install && npm run dev
 
 ### `POST /api/chat` — 입력 업로드, 세션 시작
 
-multipart/form-data 필드 중 최소 하나:
+multipart/form-data. `text` 또는 `audio` 중 최소 하나 필수, `image`는 선택:
 - `text`: string
 - `audio`: file (`audio/webm;codecs=opus` 또는 `audio/ogg;codecs=opus`)
+- `image`: file (선택, 카메라 프레임. `image/jpeg·png·gif·webp`, ≤8MB. 이미지 단독 전송은 400)
 
 응답:
 ```json
@@ -163,6 +165,18 @@ AI에게는 `search_documents` **tool**이 주어집니다. 사용자가 업로�
 - **벡터 저장소**: `pgvector`, `vector(1024)` + HNSW(`vector_cosine_ops`) 인덱스.
 - **청킹**: 문자 기준 `RAG_CHUNK_SIZE`(기본 800), `RAG_CHUNK_OVERLAP`(150), 문단/문장 경계에 스냅.
 - **문서 단위**: 파일명 하나당 문서 하나(`documents.filename` UNIQUE). 같은 파일명을 다시 올리면 — 내용이 같으면(sha256 동일) 재임베딩 없이 skip, 내용이 바뀌었으면 기존 문서를 교체(청크 cascade 삭제). 다른 파일명이면 내용이 같아도 별도 문서로 저장. 동시 업로드는 파일명 단위 advisory lock으로 직렬화.
+
+## 카메라 비전
+
+웹 하단 입력 행의 **카메라 버튼**([음성][파일][카메라][⋯] 순)으로 카메라를 켜면, 우측 상단에 라이브 프리뷰가 뜨고 이후 **모든 대화 전송(텍스트·음성)에 그 순간의 프레임이 함께 전송**됩니다. 끄기는 다시 카메라 버튼으로. AI에게 이미지는 "사용자 카메라에 지금 비친 실시간 장면"으로 전달되어, 대화와 관련 있으면 확인해 답하고 무관하면 무시하도록 프롬프트됩니다(`server/src/ai/system-prompt.ts`).
+
+- **캡처**: 클라이언트 canvas에서 긴 변 1024px JPEG(q0.8)로 다운스케일. 프리뷰는 전면 카메라만 거울 반전(셀피), 후면은 그대로. **캡처는 항상 원본 방향**(모델에겐 실제 장면). 캡처 실패 시 이미지 없이 전송은 계속됨.
+- **전/후면 전환**: 카메라가 2개 이상인 기기(폰 등)에서만 프리뷰 아래에 전환 버튼 표시(`facingMode` user↔environment). 카메라 1개인 PC에선 숨김.
+- **버블 썸네일**: 이미지를 함께 보낸 턴은 내 대화 버블에 캡처 썸네일이 작게 표시됩니다(클라이언트 전용 object URL — 서버로 되돌아오지 않음).
+- **전송**: `POST /api/chat`의 선택적 `image` 파트(위 [프로토콜](#post-apichat--입력-업로드-세션-시작)). 라우트에서 mimetype 화이트리스트·8MB 검증. 이미지는 저장하지 않고 메모리에서 provider로 바로 전달.
+- **히스토리 정책**: 이 앱은 대화 히스토리를 매 호출 전체 재전송(stateless API)하므로, 이미지가 쌓이면 매 턴 재전송·재과금됩니다. 그래서 provider가 **가장 최근 이미지 1장만 유지**하고 이전 이미지 파트는 `"[이전 카메라 캡처 — 생략됨]"` 텍스트로 치환합니다 (`server/src/ai/{openai,anthropic}.ts`).
+- **모델 요구**: `AI_MODEL`이 **vision(이미지 입력) 지원 모델**이어야 합니다. 미지원이면 카메라 턴은 SSE `error` 이벤트로 실패합니다(폴백 없음).
+- **브라우저**: `getUserMedia`는 secure context 필요 — localhost는 OK, 원격 http 배포에선 동작 안 함.
 
 ## AI 대화 세션
 
