@@ -46,6 +46,37 @@ export async function startChat(input: {
   return { sessionId: json.session_id, config: json.config };
 }
 
+export interface UploadResult {
+  documentId: string;
+  filename: string;
+  chunks: number;
+  skipped: boolean;
+}
+
+/** Uploads a text file to the RAG store. */
+export async function uploadDocument(file: File): Promise<UploadResult> {
+  const fd = new FormData();
+  fd.append("file", file, file.name);
+  const res = await fetch("/api/documents", { method: "POST", body: fd });
+  if (!res.ok) {
+    let message = `${res.status}`;
+    try {
+      const body = await res.json();
+      if (body?.error) message = body.error;
+    } catch {
+      // ignore non-JSON error bodies
+    }
+    throw new Error(message);
+  }
+  const json = await res.json();
+  return {
+    documentId: json.document_id,
+    filename: json.filename,
+    chunks: json.chunks,
+    skipped: Boolean(json.skipped),
+  };
+}
+
 export type ChatEvent =
   | { type: "stt"; text: string; source: "audio" | "text" }
   | { type: "ai_delta"; text: string }

@@ -1,12 +1,26 @@
+import type { RagStore } from "../rag/store.ts";
 import { createGetWeatherTool } from "./get-weather.ts";
+import { createSearchDocumentsTool } from "./search-documents.ts";
 import type { Tool } from "./types.ts";
 
 /** Max AI<->tool round-trips per user turn, guarding against tool loops. */
 export const MAX_TOOL_STEPS = 5;
 
+export interface ToolDeps {
+  ragStore: RagStore;
+  /** Default number of chunks search_documents returns. */
+  ragTopK: number;
+}
+
 /** The tools exposed to the AI provider. */
-export function createTools(): Tool[] {
-  return [createGetWeatherTool()];
+export function createTools(deps: ToolDeps): Tool[] {
+  return [
+    createGetWeatherTool(),
+    createSearchDocumentsTool({
+      ragStore: deps.ragStore,
+      defaultTopK: deps.ragTopK,
+    }),
+  ];
 }
 
 /**

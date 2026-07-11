@@ -30,6 +30,7 @@ function optionalInt(name: string): number | undefined {
 export type SttProviderName = "google";
 export type AiProviderName = "openai" | "anthropic";
 export type TtsProviderName = "google";
+export type EmbeddingsProviderName = "ollama";
 
 export interface SttConfig {
   provider: SttProviderName;
@@ -56,6 +57,24 @@ export interface TtsConfig {
   audioEncoding: TtsAudioEncoding;
 }
 
+export interface RagConfig {
+  /** postgres connection string for the pgvector-backed store. */
+  databaseUrl: string;
+  embeddingsProvider: EmbeddingsProviderName;
+  /** Base URL of the self-hosted embedding server (Ollama). */
+  embeddingsUrl: string;
+  /** Model tag pulled/served by the embedding server. */
+  embeddingsModel: string;
+  /** Vector dimension the model emits; must match the model above. */
+  embeddingDim: number;
+  /** Max characters per chunk when splitting an uploaded document. */
+  chunkSize: number;
+  /** Character overlap between adjacent chunks. */
+  chunkOverlap: number;
+  /** Default number of chunks the search_documents tool returns. */
+  topK: number;
+}
+
 export interface Config {
   port: number;
   openaiKey: string;
@@ -63,6 +82,7 @@ export interface Config {
   stt: SttConfig;
   ai: AiConfig;
   tts: TtsConfig;
+  rag: RagConfig;
   sentenceBoundaryChars: string;
 }
 
@@ -111,6 +131,37 @@ function parseTts(): TtsConfig {
   };
 }
 
+function parseRag(): RagConfig {
+  const provider = (optional("EMBEDDINGS_PROVIDER") ??
+    "ollama") as EmbeddingsProviderName;
+  if (provider !== "ollama") {
+    throw new Error(`Unsupported EMBEDDINGS_PROVIDER: ${provider}`);
+  }
+  const dim = optionalInt("EMBEDDING_DIM") ?? 1024;
+  if (!Number.isInteger(dim) || dim <= 0) {
+    throw new Error(`Invalid EMBEDDING_DIM: ${dim}`);
+  }
+  const chunkSize = optionalInt("RAG_CHUNK_SIZE") ?? 800;
+  const chunkOverlap = optionalInt("RAG_CHUNK_OVERLAP") ?? 150;
+  if (chunkOverlap >= chunkSize) {
+    throw new Error(
+      `RAG_CHUNK_OVERLAP (${chunkOverlap}) must be smaller than RAG_CHUNK_SIZE (${chunkSize})`,
+    );
+  }
+  return {
+    databaseUrl:
+      optional("DATABASE_URL") ?? "postgres://hola:hola@localhost:5432/hola",
+    embeddingsProvider: provider,
+    embeddingsUrl: optional("EMBEDDINGS_URL") ?? "http://localhost:11434",
+    embeddingsModel:
+      optional("EMBEDDINGS_MODEL") ?? "hf.co/Bingsu/KURE-v1-Q8_0-GGUF",
+    embeddingDim: dim,
+    chunkSize,
+    chunkOverlap,
+    topK: optionalInt("RAG_TOP_K") ?? 5,
+  };
+}
+
 export const config: Config = {
   port: optionalInt("PORT") ?? 3000,
   openaiKey: required("OPENAI_KEY"),
@@ -118,6 +169,7 @@ export const config: Config = {
   stt: parseStt(),
   ai: parseAi(),
   tts: parseTts(),
+  rag: parseRag(),
   sentenceBoundaryChars:
     optional("SENTENCE_BOUNDARY_CHARS") ?? ".,!?;:\n。，！？；：",
 };

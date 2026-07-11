@@ -1,14 +1,72 @@
 services:
+  db:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: hola
+      POSTGRES_PASSWORD: hola
+      POSTGRES_DB: hola
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hola -d hola"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  embeddings:
+    image: ollama/ollama
+    environment:
+      EMBEDDINGS_MODEL: ${EMBEDDINGS_MODEL:-hf.co/Bingsu/KURE-v1-Q8_0-GGUF}
+    volumes:
+      - ollama:/root/.ollama
+    ports:
+      - "11434:11434"
+    # Start the server, wait for it, then pull the embedding model on first boot
+    # (cached in the `ollama` volume afterwards). `$$` escapes compose so the
+    # shell — not compose — expands the variable at runtime.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        ollama serve &
+        until ollama list >/dev/null 2>&1; do sleep 1; done
+        echo "pulling $${EMBEDDINGS_MODEL}"
+        ollama pull "$${EMBEDDINGS_MODEL}"
+        wait
+    # Healthy only once the model is actually pulled — the server gates on this
+    # so the first upload/search never races the (minutes-long) first-boot pull.
+    healthcheck:
+      test: ["CMD-SHELL", "ollama show \"$${EMBEDDINGS_MODEL}\" >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 600s
+    restart: unless-stopped
+
   server:
     build: ./server
     env_file: ./server/.env
     environment:
       PORT: 3000
       GOOGLE_APPLICATION_CREDENTIALS: /secrets/google_service_account.json
+      DATABASE_URL: postgres://hola:hola@db:5432/hola
+      EMBEDDINGS_URL: http://embeddings:11434
+      # Single source of truth for the model under compose: server + embeddings
+      # both read ${EMBEDDINGS_MODEL} (host/project-root .env), defaulting to the
+      # KURE-v1 GGUF. NOTE: this overrides any EMBEDDINGS_MODEL in server/.env —
+      # set it here (shell/root .env), e.g. `EMBEDDINGS_MODEL=bge-m3 docker compose up`.
+      EMBEDDINGS_MODEL: ${EMBEDDINGS_MODEL:-hf.co/Bingsu/KURE-v1-Q8_0-GGUF}
     volumes:
       - ./server/google_service_account.json:/secrets/google_service_account.json:ro
     ports:
       - "3000:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+      embeddings:
+        condition: service_healthy
     restart: unless-stopped
 
   web:
@@ -18,3 +76,7 @@ services:
     depends_on:
       - server
     restart: unless-stopped
+
+volumes:
+  pgdata:
+  ollama:

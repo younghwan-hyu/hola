@@ -3,19 +3,30 @@ import express from "express";
 
 import { createAiProvider } from "./ai/index.ts";
 import { config } from "./config.ts";
+import { createEmbeddingsProvider } from "./embeddings/index.ts";
 import { createChatRouter } from "./routes/chat.ts";
+import { createDocumentsRouter } from "./routes/documents.ts";
+import { createPool, initDb } from "./rag/db.ts";
+import { createRagStore } from "./rag/store.ts";
 import { createSttProvider } from "./stt/index.ts";
 import { createTools } from "./tools/index.ts";
 import { createTtsProvider } from "./tts/index.ts";
 
 const stt = createSttProvider(config.stt);
-const tools = createTools();
+const tts = createTtsProvider(config.tts);
+
+// RAG: self-hosted embeddings + pgvector store. The search_documents tool reads
+// from this store, so it must be built before the AI provider gets its tools.
+const embeddings = createEmbeddingsProvider(config.rag);
+const pool = createPool(config.rag.databaseUrl);
+const ragStore = createRagStore({ pool, embeddings, config: config.rag });
+
+const tools = createTools({ ragStore, ragTopK: config.rag.topK });
 const ai = createAiProvider(
   config.ai,
   { openaiKey: config.openaiKey, anthropicKey: config.anthropicKey },
   tools,
 );
-const tts = createTtsProvider(config.tts);
 
 // Issue one conversation session at startup; every AI call reuses it so the
 // avatar keeps context across turns for the server's lifetime.
@@ -32,10 +43,31 @@ app.get("/api/health", (_req, res) => {
     stt: { provider: config.stt.provider, model: config.stt.model },
     ai: { provider: config.ai.provider, model: config.ai.model },
     tts: { provider: config.tts.provider, voice: config.tts.voice },
+    rag: {
+      provider: config.rag.embeddingsProvider,
+      model: config.rag.embeddingsModel,
+      dim: config.rag.embeddingDim,
+    },
   });
 });
 
 app.use("/api", createChatRouter({ config, stt, ai, aiSession, tts }));
+app.use("/api", createDocumentsRouter({ ragStore }));
+
+// Ensure the pgvector schema exists before serving so the first upload never
+// races schema creation. Non-fatal: if the DB is unreachable the base voice
+// pipeline still works and RAG endpoints error until the DB comes up.
+try {
+  await initDb(pool, {
+    model: config.rag.embeddingsModel,
+    dim: config.rag.embeddingDim,
+  });
+  console.log("[hola] rag-db schema ready");
+} catch (e) {
+  console.warn(
+    `[hola] rag-db init failed (RAG disabled until DB is up): ${e instanceof Error ? e.message : String(e)}`,
+  );
+}
 
 app.listen(config.port, () => {
   console.log(`[hola] listening on :${config.port}`);
@@ -43,14 +75,20 @@ app.listen(config.port, () => {
     `[hola] stt=${config.stt.provider}/${config.stt.model} ai=${config.ai.provider}/${config.ai.model} tts=${config.tts.provider}/${config.tts.voice}`,
   );
   console.log(`[hola] tools=[${tools.map((t) => t.name).join(", ")}]`);
+  console.log(
+    `[hola] rag=${config.rag.embeddingsProvider}/${config.rag.embeddingsModel} dim=${config.rag.embeddingDim} db=${config.rag.databaseUrl.replace(/\/\/[^@]*@/, "//***@")}`,
+  );
   console.log(`[hola] ai session issued: ${aiSession.key}`);
 
   // Warm clients in parallel — don't block listen, log per-provider failure.
+  // embeddings.warmup triggers the model load (the container pulls it on first
+  // boot, so warmup retries with backoff).
   const warmupStart = Date.now();
   const tasks: Array<[string, Promise<void>]> = [
     ["stt", stt.warmup()],
     ["ai", ai.warmup()],
     ["tts", tts.warmup()],
+    ["embeddings", embeddings.warmup()],
   ];
   void Promise.all(
     tasks.map(async ([name, p]) => {

@@ -17,6 +17,7 @@
 - **AI**: streaming, 문장 부호 단위로 분할하여 TTS 큐로 전달. 서버 전역 **대화 세션**으로 이전 턴 문맥을 유지 (아래 [AI 대화 세션](#ai-대화-세션))
 - **TTS**: streaming, 문장 단위로 순차 재생 (기본 PCM 24kHz int16 LE)
 - **제스처**: AI 응답에 섞인 `{gesture=NAME}` 커맨드를 서버가 파싱해 음성 텍스트와 분리, `gesture` 이벤트로 전송 → 브라우저가 아바타 제스처 재생 (아래 [제스처 커맨드](#제스처-커맨드))
+- **RAG(문서 검색)**: 업로드한 텍스트 문서를 로컬 임베딩(pgvector)으로 저장하고, AI가 `search_documents` 도구로 검색해 답변 근거로 활용 (아래 [RAG](#rag-문서-검색))
 
 > ⚠️ TTS 포맷은 기본값 **PCM** 입니다. Google streaming TTS는 OGG_OPUS도 지원하지만 Chrome의 MSE byte stream에는 OGG 컨테이너가 없어 청크 append가 안 됩니다. PCM이면 `AudioBufferSourceNode`로 청크별 스케줄링이 깔끔하게 됩니다. 대역폭이 중요한 경우 `TTS_AUDIO_ENCODING=OGG_OPUS`로 바꾸고 클라이언트에 wasm Opus 디코더를 붙이면 됩니다.
 
@@ -24,31 +25,54 @@
 
 ```
 .
-├── server/         # TypeScript + Express, STT/AI/TTS provider 추상화
+├── server/         # TypeScript + Express, STT/AI/TTS/임베딩 provider 추상화 + RAG
 ├── web/            # Vite + React + three.js VRM 아바타 (립싱크/제스처), Web Audio 청크 재생
-└── compose.yml     # 한 번에 띄우기
+└── compose.yml     # server + web + db(pgvector) + embeddings(ollama) 한 번에 띄우기
 ```
+
+compose는 4개 서비스를 올립니다: `server`, `web`, `db`(pgvector), `embeddings`(Ollama, 임베딩 모델을 로컬 구동).
 
 ## 사전 준비
 
 - Node 22+, Docker (compose용)
 - `server/google_service_account.json` (Cloud Speech-to-Text + Text-to-Speech 권한)
 - OpenAI / Anthropic API 키
+- (RAG용 별도 준비물 없음 — 임베딩 모델은 `embeddings` 컨테이너가 첫 기동 시 자동 다운로드)
 
 ## docker compose로 실행
+
+먼저 `server/.env`를 만들고 키를 채웁니다 (compose가 `env_file`로 주입하므로 필수):
+
+```bash
+cp server/.env.example server/.env   # OPENAI_KEY / ANTHROPIC_KEY / AI_MODEL / TTS_VOICE 등 채우기
+```
 
 ```bash
 docker compose up --build
 # web:    http://localhost:8080
 # server: http://localhost:3000/api/health
+# db:     localhost:5432 (pgvector)
+# embed:  http://localhost:11434 (ollama)
 ```
 
-`server/.env`에 채워둔 키들을 compose가 그대로 주입합니다. `GOOGLE_APPLICATION_CREDENTIALS`만 컨테이너 내부 경로로 덮어쓰여 마운트된 JSON을 가리킵니다.
+`server/.env`에 채워둔 키들을 compose가 그대로 주입합니다. `GOOGLE_APPLICATION_CREDENTIALS`, `DATABASE_URL`, `EMBEDDINGS_URL`은 컨테이너 내부 경로/호스트명으로, `EMBEDDINGS_MODEL`은 `server`·`embeddings` 두 서비스가 항상 같은 값을 쓰도록 compose 변수(`${EMBEDDINGS_MODEL:-...}`)로 덮어쓰입니다. 따라서 compose에서 모델을 바꿀 땐 `server/.env`가 아니라 셸/프로젝트 루트 `.env`에 `EMBEDDINGS_MODEL`을 지정하세요.
+
+> ⚠️ **첫 기동**: `embeddings` 컨테이너가 임베딩 모델(기본 `hf.co/Bingsu/KURE-v1-Q8_0-GGUF`, ~634MB)을 다운로드하므로 최초 1회는 몇 분 걸립니다. 모델은 `ollama` 볼륨에 캐시되어 이후로는 즉시 뜹니다. 서버는 임베딩이 준비될 때까지 warmup을 재시도합니다.
+>
+> 다른 임베딩 모델로 바꾸려면 `EMBEDDINGS_MODEL` 환경변수를 지정해서 띄우세요 (예: 다국어 bge-m3):
+> ```bash
+> EMBEDDINGS_MODEL=bge-m3 docker compose up --build
+> ```
 
 ## 로컬 개발 (docker 없이)
 
+RAG용 db·embeddings는 컨테이너로만 띄우고, server/web은 로컬에서 돌립니다:
+
 ```bash
-# 서버
+# db(pgvector) + embeddings(ollama)만 컨테이너로
+docker compose up db embeddings
+
+# 서버 (다른 터미널) — env 기본값이 localhost:5432 / :11434를 가리킴
 cd server && npm install && npm run dev
 # 웹 (다른 터미널)
 cd web && npm install && npm run dev
@@ -80,6 +104,13 @@ cd web && npm install && npm run dev
 | TTS 오디오 포맷 | `TTS_AUDIO_ENCODING` | `PCM` (또는 `OGG_OPUS`) |
 | 문장 분할 기호 | `SENTENCE_BOUNDARY_CHARS` | `.,!?;:\n。，！？；：` |
 | Python 실행 파일 (weather tool) | `PYTHON_BIN` | `python3` |
+| Postgres(pgvector) 접속 | `DATABASE_URL` | `postgres://hola:hola@localhost:5432/hola` |
+| 임베딩 provider | `EMBEDDINGS_PROVIDER` | `ollama` |
+| 임베딩 서버 URL | `EMBEDDINGS_URL` | `http://localhost:11434` |
+| 임베딩 모델 | `EMBEDDINGS_MODEL` | `hf.co/Bingsu/KURE-v1-Q8_0-GGUF` (bge-m3로 교체 가능) |
+| 임베딩 차원 | `EMBEDDING_DIM` | `1024` |
+| 청크 크기 / 겹침 | `RAG_CHUNK_SIZE` / `RAG_CHUNK_OVERLAP` | `800` / `150` |
+| 검색 반환 청크 수 | `RAG_TOP_K` | `5` |
 
 ## 프로토콜
 
@@ -115,6 +146,23 @@ multipart/form-data 필드 중 최소 하나:
 - `error` `{ message }`
 
 각 세션은 정확히 한 번만 구독될 수 있고, 구독된 직후부터 sse가 닫힐 때까지 위 이벤트가 흘러옵니다.
+
+### 문서 API (RAG)
+
+- `POST /api/documents` — multipart `file` (텍스트 파일, ≤1MB, `.txt`/`.md`). 서버가 청킹→임베딩→pgvector 저장. 응답 `{ document_id, filename, chunks, skipped }` (같은 파일명·같은 내용을 다시 올리면 `skipped:true`).
+- `GET /api/documents` — 저장된 문서 목록 `[{ id, filename, chunkCount, uploadedAt }]` (camelCase — POST 응답의 snake_case와 다름).
+- `DELETE /api/documents/:id` — 문서와 청크 삭제 (204).
+
+## RAG (문서 검색)
+
+웹의 **"문서 업로드"** 버튼(입력 바 확장 시 표시)으로 텍스트 파일을 올리면, 서버가 문장/문단 경계 기준으로 청킹하고 **로컬 임베딩 모델**로 벡터화해 **pgvector**에 저장합니다. 임베딩은 외부 API가 아니라 compose의 `embeddings`(Ollama) 컨테이너에서 직접 구동됩니다.
+
+AI에게는 `search_documents` **tool**이 주어집니다. 사용자가 업로드한 문서에 있을 법한 내용을 물으면 모델이 이 도구로 코사인 유사도 검색을 수행하고, 그 결과를 근거로 답합니다(근거 없으면 "모른다"고 답하도록 프롬프트됨). 검색은 자동 컨텍스트 주입이 아니라 **모델이 필요할 때만 호출**하는 방식입니다.
+
+- **임베딩 모델**: 기본 `hf.co/Bingsu/KURE-v1-Q8_0-GGUF`(고려대 KURE-v1, 한국어 검색 특화, 1024-d, MTEB-ko-retrieval 1위 계열). 다국어가 필요하면 `EMBEDDINGS_MODEL=bge-m3`로 교체(동일 1024-d). 모델을 바꾸면 인제스트/쿼리 임베딩 공간이 달라지므로 **문서를 재업로드**해야 합니다. 서버는 부팅 시 `rag_meta`에 기록된 모델과 현재 설정이 다르고 기존 청크가 있으면 경고를 남깁니다.
+- **벡터 저장소**: `pgvector`, `vector(1024)` + HNSW(`vector_cosine_ops`) 인덱스.
+- **청킹**: 문자 기준 `RAG_CHUNK_SIZE`(기본 800), `RAG_CHUNK_OVERLAP`(150), 문단/문장 경계에 스냅.
+- **문서 단위**: 파일명 하나당 문서 하나(`documents.filename` UNIQUE). 같은 파일명을 다시 올리면 — 내용이 같으면(sha256 동일) 재임베딩 없이 skip, 내용이 바뀌었으면 기존 문서를 교체(청크 cascade 삭제). 다른 파일명이면 내용이 같아도 별도 문서로 저장. 동시 업로드는 파일명 단위 advisory lock으로 직렬화.
 
 ## AI 대화 세션
 

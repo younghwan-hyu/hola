@@ -5,7 +5,15 @@ import {
   type FormEvent,
   type KeyboardEvent,
 } from "react";
-import { ChevronDown, Loader2, MoreHorizontal, Send, Smile, X } from "lucide-react";
+import {
+  ChevronDown,
+  FileUp,
+  Loader2,
+  MoreHorizontal,
+  Send,
+  Smile,
+  X,
+} from "lucide-react";
 
 import {
   Avatar,
@@ -18,6 +26,7 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   startChat,
   subscribeChat,
+  uploadDocument,
   type ChatEvent,
 } from "@/lib/api";
 import { GESTURES, isAvatarGesture, type AvatarGesture } from "@/lib/gestures";
@@ -70,16 +79,50 @@ export default function App() {
   // Input is voice-first: collapsed shows only a hero mic + "..."; expanding
   // reveals the full bar (text input + gesture button).
   const [expanded, setExpanded] = useState(false);
+  // Document upload (RAG) is independent of the chat `busy` state.
+  const [uploading, setUploading] = useState(false);
+  const [uploadMsg, setUploadMsg] = useState<string | null>(null);
 
   const playerRef = useRef<StreamingPcmPlayer>(new StreamingPcmPlayer());
   const avatarRef = useRef<AvatarHandle>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const uploadMsgTimer = useRef<number | null>(null);
   const leavingTimers = useRef<Map<string, number>>(new Map());
+
+  const flashUploadMsg = (msg: string) => {
+    setUploadMsg(msg);
+    if (uploadMsgTimer.current !== null)
+      window.clearTimeout(uploadMsgTimer.current);
+    uploadMsgTimer.current = window.setTimeout(() => setUploadMsg(null), 4000);
+  };
+
+  const onFilePicked = async (file: File | undefined) => {
+    if (!file || uploading) return;
+    setUploading(true);
+    setUploadMsg(null);
+    try {
+      const r = await uploadDocument(file);
+      flashUploadMsg(
+        r.skipped
+          ? `${r.filename} — 이미 저장된 문서입니다`
+          : `${r.filename} · ${r.chunks}개 청크 저장됨`,
+      );
+    } catch (e) {
+      flashUploadMsg(
+        `업로드 실패: ${e instanceof Error ? e.message : "unknown"}`,
+      );
+    } finally {
+      setUploading(false);
+    }
+  };
 
   useEffect(() => {
     return () => {
       playerRef.current.dispose();
       for (const t of leavingTimers.current.values()) window.clearTimeout(t);
       leavingTimers.current.clear();
+      if (uploadMsgTimer.current !== null)
+        window.clearTimeout(uploadMsgTimer.current);
     };
   }, []);
 
@@ -291,6 +334,18 @@ export default function App() {
         ))}
       </div>
 
+      {uploadMsg && (
+        <div
+          className={`pointer-events-none absolute inset-x-0 ${
+            expanded ? "bottom-40" : "bottom-44"
+          } flex justify-center px-4`}
+        >
+          <div className="animate-in fade-in-0 slide-in-from-bottom-2 rounded-full border border-white/15 bg-black/50 px-4 py-2 text-xs text-white/90 shadow-lg backdrop-blur">
+            {uploadMsg}
+          </div>
+        </div>
+      )}
+
       {!audioSupported && (
         <div
           className={`pointer-events-none absolute inset-x-0 ${
@@ -348,6 +403,31 @@ export default function App() {
               rows={1}
               className="min-h-[44px] resize-none border-white/15 bg-white/5 text-white placeholder:text-white/40"
             />
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".txt,.md,.markdown,text/plain,text/markdown"
+              className="hidden"
+              onChange={(e) => {
+                void onFilePicked(e.target.files?.[0]);
+                e.target.value = "";
+              }}
+            />
+            <Button
+              type="button"
+              variant="outline"
+              size="icon"
+              className="h-11 w-11 shrink-0"
+              disabled={uploading}
+              title="문서 업로드"
+              onClick={() => fileInputRef.current?.click()}
+            >
+              {uploading ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <FileUp className="h-4 w-4" />
+              )}
+            </Button>
             <Button
               type="button"
               variant="outline"
