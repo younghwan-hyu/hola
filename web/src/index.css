@@ -60,6 +60,11 @@
   html,
   body,
   #root {
-    height: 100%;
+    /* 100vh overshoots the visible area on mobile (it includes the URL bar /
+       toolbar), pushing bottom-anchored controls off-screen. dvh tracks the
+       actually-visible viewport; 100vh stays as a fallback for old browsers. */
+    height: 100vh;
+    height: 100dvh;
+    overflow: hidden;
   }
 }

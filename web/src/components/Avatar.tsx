@@ -43,6 +43,11 @@ const MOUTH_DECAY = 0.4; // smoothing toward a more-closed target
 const BLINK_DURATION = 0.12; // seconds for a full close+open
 const VOWELS = ["ih", "ou", "ee", "oh"] as const;
 
+// How far the camera sits back from the avatar's head (metres) in the initial
+// framing. Larger = more zoomed out. The user can still dolly in/out between
+// OrbitControls' min/maxDistance.
+const CAMERA_DISTANCE = 2.2;
+
 // Per-gesture durations live in lib/gestures.ts (GESTURE_DURATION).
 
 // Right-arm rest rotations — must match setRelaxedPose() in lib/vrm.ts.
@@ -193,7 +198,7 @@ export const Avatar = forwardRef<AvatarHandle, Props>(function Avatar(
     const scene = new THREE.Scene();
 
     const camera = new THREE.PerspectiveCamera(30, width / height, 0.1, 20);
-    camera.position.set(0, 1.45, 1.8);
+    camera.position.set(0, 1.45, CAMERA_DISTANCE);
 
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
@@ -287,7 +292,11 @@ export const Avatar = forwardRef<AvatarHandle, Props>(function Avatar(
         if (head) {
           const headPos = new THREE.Vector3();
           head.getWorldPosition(headPos);
-          camera.position.set(headPos.x, headPos.y + 0.05, headPos.z + 1.8);
+          camera.position.set(
+            headPos.x,
+            headPos.y + 0.05,
+            headPos.z + CAMERA_DISTANCE,
+          );
           controls.target.set(headPos.x, headPos.y - 0.1, headPos.z);
           controls.update();
 

@@ -37,6 +37,16 @@ export function Recorder({ disabled, onCaptured, size = "default" }: Props) {
   }, []);
 
   const start = async () => {
+    // navigator.mediaDevices exists only in a secure context (HTTPS/localhost);
+    // over plain http (e.g. a phone on the LAN dev server) it is undefined.
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setError(
+        window.isSecureContext
+          ? "이 브라우저에서는 마이크를 사용할 수 없습니다."
+          : "마이크는 HTTPS/localhost 접속에서만 사용할 수 있습니다 (현재 http 접속).",
+      );
+      return;
+    }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const mime = pickMimeType();

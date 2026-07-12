@@ -54,6 +54,12 @@ const newId = () => Math.random().toString(36).slice(2, 10);
 const MAX_BUBBLES = 2; // most bubbles visible at once
 const EXIT_MS = 350; // keep a leaving bubble around this long for its exit anim
 
+// The camera preview fits inside this box while preserving the real stream
+// ratio: landscape streams fill the width, portrait streams are bounded by the
+// height (so they shrink in width) instead of growing oversized in the corner.
+const PREVIEW_MAX_W = 208; // px (was the fixed w-52 width)
+const PREVIEW_MAX_H = 240; // px
+
 /**
  * Append a bubble to the rolling window. Once at capacity, the oldest still-live
  * bubble is marked `leaving` (kept in the list so it can animate up and out) —
@@ -92,6 +98,10 @@ export default function App() {
   // Number of video inputs (known after permission); the front/back switch is
   // only shown when there are 2+ (e.g. phones, not a single-webcam PC).
   const [videoInputCount, setVideoInputCount] = useState(0);
+  // Preview aspect ratio (width / height), read from the actual stream so the
+  // top-right preview matches the real camera frame instead of a fixed 16:9
+  // crop. null until the first `loadedmetadata` (falls back to 16:9).
+  const [previewAspect, setPreviewAspect] = useState<number | null>(null);
 
   const playerRef = useRef<StreamingPcmPlayer>(new StreamingPcmPlayer());
   const avatarRef = useRef<AvatarHandle>(null);
@@ -135,6 +145,7 @@ export default function App() {
     if (stream) for (const t of stream.getTracks()) t.stop();
     cameraStreamRef.current = null;
     if (cameraVideoRef.current) cameraVideoRef.current.srcObject = null;
+    setPreviewAspect(null);
   };
 
   const startStream = (mode: "user" | "environment") =>
@@ -147,6 +158,18 @@ export default function App() {
     if (cameraOn) {
       stopCamera();
       setCameraOn(false);
+      return;
+    }
+    // navigator.mediaDevices (and thus getUserMedia) only exists in a secure
+    // context — HTTPS or localhost. Over plain http (e.g. a phone hitting the
+    // LAN dev server) it is undefined, so guard before touching it instead of
+    // throwing "cannot read properties of undefined (reading 'getUserMedia')".
+    if (!navigator.mediaDevices?.getUserMedia) {
+      flashToast(
+        window.isSecureContext
+          ? "이 브라우저에서는 카메라를 사용할 수 없습니다."
+          : "카메라는 HTTPS 또는 localhost 접속에서만 켤 수 있습니다 (현재 http 접속).",
+      );
       return;
     }
     // Guard the async start: a second click (or a click while already on) must
@@ -413,8 +436,15 @@ export default function App() {
     setGestureOpen(false);
   };
 
+  // Fit the preview inside PREVIEW_MAX_W x PREVIEW_MAX_H, keeping the real ratio:
+  // width-bound for wide streams, height-bound (narrower) for tall ones.
+  const previewRatio = previewAspect ?? 16 / 9;
+  const previewW = Math.round(
+    Math.min(PREVIEW_MAX_W, PREVIEW_MAX_H * previewRatio),
+  );
+
   return (
-    <div className="relative h-screen w-screen overflow-hidden bg-[radial-gradient(ellipse_at_center,_hsl(222_47%_13%)_0%,_hsl(222_84%_5%)_70%)]">
+    <div className="relative h-full w-full overflow-hidden bg-[radial-gradient(ellipse_at_center,_hsl(222_47%_13%)_0%,_hsl(222_84%_5%)_70%)]">
       {/* 3D avatar fills the viewport */}
       <div className="absolute inset-0">
         <Avatar
@@ -471,7 +501,7 @@ export default function App() {
                   <img
                     src={b.imageUrl}
                     alt="첨부한 카메라 이미지"
-                    className="mb-1.5 max-h-24 w-auto rounded-lg object-cover"
+                    className="mx-auto mb-1.5 block max-h-24 w-auto rounded-lg object-cover"
                   />
                 )}
                 {b.text.length > 0 && (
@@ -521,14 +551,26 @@ export default function App() {
           mirrored (selfie), back camera is not. Toggle off with the camera
           button. Captured frames are always un-mirrored (see captureFrame). */}
       {cameraOn && (
-        <div className="absolute right-4 top-4 z-[5] flex w-52 flex-col items-center gap-2">
-          <div className="w-full overflow-hidden rounded-xl border border-white/20 shadow-lg shadow-black/40">
+        <div className="absolute right-4 top-4 z-[5] flex flex-col items-end gap-2">
+          <div
+            className="overflow-hidden rounded-xl border border-white/20 shadow-lg shadow-black/40"
+            style={{ width: previewW }}
+          >
             <video
               ref={cameraVideoRef}
               autoPlay
               muted
               playsInline
-              className={`aspect-video w-full object-cover ${
+              // Match the box to the real stream ratio (fires again on camera
+              // switch, when a new srcObject is bound) so the preview reflects
+              // exactly what captureFrame() sends — no fixed-16:9 crop.
+              onLoadedMetadata={(e) => {
+                const v = e.currentTarget;
+                if (v.videoWidth > 0 && v.videoHeight > 0)
+                  setPreviewAspect(v.videoWidth / v.videoHeight);
+              }}
+              style={{ aspectRatio: previewRatio }}
+              className={`w-full object-cover ${
                 facingMode === "user" ? "-scale-x-100" : ""
               }`}
             />
@@ -564,12 +606,26 @@ export default function App() {
               e.target.value = "";
             }}
           />
-          {/* Order: 음성(mic) - 파일(upload) - 카메라(camera) - ...(more). */}
+          {/* Order: 음성(mic) - 카메라(camera) - 파일(upload) - ...(more). */}
           <Recorder
             size="lg"
             disabled={busy}
             onCaptured={(blob) => void send({ audio: blob })}
           />
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            title={cameraOn ? "카메라 끄기" : "카메라 켜기"}
+            className={
+              cameraOn
+                ? "h-16 w-16 shrink-0 rounded-full bg-white text-black shadow-lg shadow-black/30 hover:bg-white/90 hover:text-black"
+                : "h-16 w-16 shrink-0 rounded-full border border-white/15 bg-black/40 text-white shadow-lg shadow-black/30 backdrop-blur hover:bg-black/55 hover:text-white"
+            }
+            onClick={() => void toggleCamera()}
+          >
+            <Camera className="h-6 w-6" />
+          </Button>
           <Button
             type="button"
             variant="ghost"
@@ -584,20 +640,6 @@ export default function App() {
             ) : (
               <FileUp className="h-6 w-6" />
             )}
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            title={cameraOn ? "카메라 끄기" : "카메라 켜기"}
-            className={
-              cameraOn
-                ? "h-16 w-16 shrink-0 rounded-full bg-white text-black shadow-lg shadow-black/30 hover:bg-white/90 hover:text-black"
-                : "h-16 w-16 shrink-0 rounded-full border border-white/15 bg-black/40 text-white shadow-lg shadow-black/30 backdrop-blur hover:bg-black/55 hover:text-white"
-            }
-            onClick={() => void toggleCamera()}
-          >
-            <Camera className="h-6 w-6" />
           </Button>
           <Button
             type="button"
