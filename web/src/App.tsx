@@ -13,6 +13,7 @@ import {
   MoreHorizontal,
   Send,
   Smile,
+  Square,
   SwitchCamera,
   X,
 } from "lucide-react";
@@ -83,6 +84,9 @@ export default function App() {
   const [avatarError, setAvatarError] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
+  // id of the AI bubble whose TTS audio is currently playing — drives the small
+  // stop button under that bubble. null when nothing is speaking.
+  const [speakingId, setSpeakingId] = useState<string | null>(null);
   // Chat as a rolling window of at most MAX_BUBBLES message bubbles (user & ai).
   const [items, setItems] = useState<Bubble[]>([]);
   const [gestureOpen, setGestureOpen] = useState(false);
@@ -104,6 +108,9 @@ export default function App() {
   const [previewAspect, setPreviewAspect] = useState<number | null>(null);
 
   const playerRef = useRef<StreamingPcmPlayer>(new StreamingPcmPlayer());
+  // aiId of a turn whose voice the user stopped, so late-arriving tts_chunks
+  // don't reappend audio or resurrect its stop button.
+  const stoppedTurnRef = useRef<string | null>(null);
   const avatarRef = useRef<AvatarHandle>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cameraStreamRef = useRef<MediaStream | null>(null);
@@ -294,9 +301,31 @@ export default function App() {
     }
   }, [items]);
 
+  // Once a turn is done (busy false), hide its stop button when the audio has
+  // fully drained. Guarded by `busy` so brief mid-stream gaps don't clear it.
+  useEffect(() => {
+    if (!speakingId || busy) return;
+    const player = playerRef.current;
+    const id = window.setInterval(() => {
+      if (!player.isPlaying()) {
+        setSpeakingId(null);
+        window.clearInterval(id);
+      }
+    }, 150);
+    return () => window.clearInterval(id);
+  }, [speakingId, busy]);
+
+  const stopSpeaking = (id: string) => {
+    playerRef.current.stop();
+    stoppedTurnRef.current = id;
+    setSpeakingId(null);
+  };
+
   const send = async (payload: { text?: string; audio?: Blob }) => {
     if (busy) return;
     setBusy(true);
+    setSpeakingId(null);
+    stoppedTurnRef.current = null;
     const turnId = newId();
     const userId = `${turnId}:u`;
     const aiId = `${turnId}:a`;
@@ -350,6 +379,9 @@ export default function App() {
       const onAiError = (message: string) => {
         player.finish();
         setBusy(false);
+        // Don't clear speakingId here: any TTS already buffered keeps playing,
+        // so leave the stop button up (the drain effect hides it once the audio
+        // finishes) rather than removing the only control while it's audible.
         if (!aiCreated) {
           aiCreated = true;
           setItems((prev) =>
@@ -389,8 +421,13 @@ export default function App() {
               onAiText(ev.text, false);
               return;
             case "tts_chunk":
-              if (audioSupported && handle.config.audio.encoding === "PCM") {
+              if (
+                audioSupported &&
+                handle.config.audio.encoding === "PCM" &&
+                stoppedTurnRef.current !== aiId
+              ) {
                 player.appendPcm(base64ToArrayBuffer(ev.audio));
+                setSpeakingId(aiId);
               }
               return;
             case "done":
@@ -509,12 +546,28 @@ export default function App() {
                 )}
               </div>
             ) : (
-              <div className="max-w-[80%] rounded-2xl rounded-bl-sm border border-white/15 bg-black/40 px-4 py-2 text-sm leading-relaxed text-white shadow-lg backdrop-blur">
-                {b.text.length > 0 && (
-                  <p className="whitespace-pre-wrap break-words">{b.text}</p>
-                )}
-                {b.error && (
-                  <p className="mt-1 text-xs text-destructive">{b.error}</p>
+              <div className="flex max-w-[80%] flex-col items-start gap-1">
+                <div className="rounded-2xl rounded-bl-sm border border-white/15 bg-black/40 px-4 py-2 text-sm leading-relaxed text-white shadow-lg backdrop-blur">
+                  {b.text.length > 0 && (
+                    <p className="whitespace-pre-wrap break-words">{b.text}</p>
+                  )}
+                  {b.error && (
+                    <p className="mt-1 text-xs text-destructive">{b.error}</p>
+                  )}
+                </div>
+                {speakingId === b.id && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => stopSpeaking(b.id)}
+                    title="음성 중지"
+                    aria-label="음성 중지"
+                    className="pointer-events-auto h-8 gap-1.5 rounded-full border border-white/15 bg-black/50 px-3 text-xs text-white shadow-lg backdrop-blur hover:bg-black/70 hover:text-white"
+                  >
+                    <Square className="h-3.5 w-3.5 fill-current" />
+                    중지
+                  </Button>
                 )}
               </div>
             )}

@@ -30,6 +30,10 @@ export class StreamingPcmPlayer {
    * held over for the next chunk so the int16 stride stays aligned.
    */
   private leftoverByte: number | null = null;
+  /** Sources scheduled but not yet ended, so stop() can halt them mid-flight. */
+  private activeSources = new Set<AudioBufferSourceNode>();
+  /** After stop(), further appended audio is ignored until the next start(). */
+  private stopped = false;
 
   static isSupported(): boolean {
     return (
@@ -70,11 +74,12 @@ export class StreamingPcmPlayer {
 
     this.nextStartTime = this.ctx.currentTime;
     this.leftoverByte = null;
+    this.stopped = false;
   }
 
   appendPcm(buffer: ArrayBuffer): void {
     const ctx = this.ctx;
-    if (!ctx) return;
+    if (!ctx || this.stopped) return;
 
     let bytes: Uint8Array = new Uint8Array(buffer);
 
@@ -109,6 +114,11 @@ export class StreamingPcmPlayer {
     const source = ctx.createBufferSource();
     source.buffer = audioBuffer;
     source.connect(this.analyser ?? ctx.destination);
+    this.activeSources.add(source);
+    source.onended = () => {
+      this.activeSources.delete(source);
+      source.disconnect();
+    };
 
     const startAt = Math.max(ctx.currentTime, this.nextStartTime);
     source.start(startAt);
@@ -139,11 +149,42 @@ export class StreamingPcmPlayer {
     return this.nextStartTime > this.ctx.currentTime + 0.02;
   }
 
+  /**
+   * Stop playback immediately: halt every scheduled source and drop any audio
+   * appended afterwards until the next start(). Used by the "stop voice" button.
+   */
+  stop(): void {
+    this.stopped = true;
+    for (const source of this.activeSources) {
+      source.onended = null;
+      try {
+        source.stop();
+      } catch {
+        // already stopped or ended — ignore
+      }
+      source.disconnect();
+    }
+    this.activeSources.clear();
+    this.leftoverByte = null;
+    if (this.ctx) this.nextStartTime = this.ctx.currentTime;
+  }
+
   finish(): void {
     // PCM has no end-of-stream marker; sources finish naturally.
   }
 
   dispose(): void {
+    for (const source of this.activeSources) {
+      source.onended = null;
+      try {
+        source.stop();
+      } catch {
+        // ignore
+      }
+      source.disconnect();
+    }
+    this.activeSources.clear();
+    this.stopped = false;
     if (this.ctx) {
       void this.ctx.close().catch(() => {});
       this.ctx = null;
