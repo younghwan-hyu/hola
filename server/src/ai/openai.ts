@@ -4,7 +4,12 @@ import OpenAI from "openai";
 
 import type { AiConfig } from "../config.ts";
 import { MAX_TOOL_STEPS, callTool, type Tool } from "../tools/index.ts";
-import type { AiInput, AiProvider, AiSession } from "./types.ts";
+import type {
+  AiClassifyInput,
+  AiInput,
+  AiProvider,
+  AiSession,
+} from "./types.ts";
 
 interface OpenAiSession extends AiSession {
   key: string;
@@ -71,6 +76,35 @@ export function createOpenAiProvider(
     },
     async warmup(): Promise<void> {
       await client.models.list();
+    },
+    async classify({
+      prompt,
+      image,
+      maxTokens,
+    }: AiClassifyInput): Promise<string> {
+      // No system prompt, no history, no tools, and no reasoning effort: this is
+      // a polled label lookup, not part of the conversation. `detail: "low"`
+      // bills the image at a flat, small token count.
+      const res = await client.chat.completions.create({
+        model: cfg.model,
+        max_completion_tokens: maxTokens,
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: prompt },
+              {
+                type: "image_url",
+                image_url: {
+                  url: `data:${image.mimeType};base64,${image.bytes.toString("base64")}`,
+                  detail: "low",
+                },
+              },
+            ],
+          },
+        ],
+      });
+      return res.choices[0]?.message?.content?.trim() ?? "";
     },
     async *stream(
       { prompt, image }: AiInput,

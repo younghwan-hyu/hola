@@ -9,6 +9,15 @@ export interface AiInput {
   image?: { bytes: Buffer; mimeType: string };
 }
 
+/** A one-shot look at an image, outside of any conversation. */
+export interface AiClassifyInput {
+  /** Question put to the model. Should demand exactly one short label. */
+  prompt: string;
+  image: { bytes: Buffer; mimeType: string };
+  /** Cap on the answer — a label is a token or two. */
+  maxTokens: number;
+}
+
 /**
  * A conversation session. `key` is issued when the session is created (at
  * server startup) and the session accumulates conversation history so that
@@ -36,6 +45,15 @@ export interface AiProvider {
    * next call.
    */
   stream(input: AiInput, session: AiSession): AsyncIterable<string>;
+  /**
+   * Answer a single question about an image and return the raw text, trimmed.
+   *
+   * Deliberately session-less: no system prompt, no history, no tools, no
+   * streaming and a hard token cap. Perception checks
+   * (`server/src/perception`) poll this on a timer, so it must stay cheap and
+   * must never write to the conversation.
+   */
+  classify(input: AiClassifyInput): Promise<string>;
   /** Pre-warm TLS / auth / connection so the first user request isn't cold. */
   warmup(): Promise<void>;
 }

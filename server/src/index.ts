@@ -4,8 +4,13 @@ import express from "express";
 import { createAiProvider } from "./ai/index.ts";
 import { config } from "./config.ts";
 import { createEmbeddingsProvider } from "./embeddings/index.ts";
+import {
+  createPerceptionChecks,
+  withPerceptionGuidance,
+} from "./perception/index.ts";
 import { createChatRouter } from "./routes/chat.ts";
 import { createDocumentsRouter } from "./routes/documents.ts";
+import { createPerceptionRouter } from "./routes/perception.ts";
 import { createPool, initDb } from "./rag/db.ts";
 import { createRagStore } from "./rag/store.ts";
 import { createSttProvider } from "./stt/index.ts";
@@ -22,8 +27,20 @@ const pool = createPool(config.rag.databaseUrl);
 const ragStore = createRagStore({ pool, embeddings, config: config.rag });
 
 const tools = createTools({ ragStore, ragTopK: config.rag.topK });
+
+// Perception checks are one-shot looks at a camera frame, polled by the browser
+// while the camera is on and run OUTSIDE the conversation session. Each check
+// carries the system-prompt rule for its own signals, so they're folded into the
+// prompt before the provider is built (see perception/index.ts).
+const perceptionChecks = createPerceptionChecks();
 const ai = createAiProvider(
-  config.ai,
+  {
+    ...config.ai,
+    systemPrompt: withPerceptionGuidance(
+      config.ai.systemPrompt,
+      perceptionChecks,
+    ),
+  },
   { openaiKey: config.openaiKey, anthropicKey: config.anthropicKey },
   tools,
 );
@@ -48,11 +65,13 @@ app.get("/api/health", (_req, res) => {
       model: config.rag.embeddingsModel,
       dim: config.rag.embeddingDim,
     },
+    perception: perceptionChecks.map((c) => c.name),
   });
 });
 
 app.use("/api", createChatRouter({ config, stt, ai, aiSession, tts }));
 app.use("/api", createDocumentsRouter({ ragStore }));
+app.use("/api", createPerceptionRouter({ checks: perceptionChecks, ai }));
 
 // Ensure the pgvector schema exists before serving so the first upload never
 // races schema creation. Non-fatal: if the DB is unreachable the base voice
@@ -75,6 +94,9 @@ app.listen(config.port, () => {
     `[hola] stt=${config.stt.provider}/${config.stt.model} ai=${config.ai.provider}/${config.ai.model} tts=${config.tts.provider}/${config.tts.voice}`,
   );
   console.log(`[hola] tools=[${tools.map((t) => t.name).join(", ")}]`);
+  console.log(
+    `[hola] perception=[${perceptionChecks.map((c) => `${c.name}@${c.intervalMs}ms`).join(", ")}]`,
+  );
   console.log(
     `[hola] rag=${config.rag.embeddingsProvider}/${config.rag.embeddingsModel} dim=${config.rag.embeddingDim} db=${config.rag.databaseUrl.replace(/\/\/[^@]*@/, "//***@")}`,
   );

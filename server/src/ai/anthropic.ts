@@ -4,7 +4,12 @@ import Anthropic from "@anthropic-ai/sdk";
 
 import type { AiConfig } from "../config.ts";
 import { MAX_TOOL_STEPS, callTool, type Tool } from "../tools/index.ts";
-import type { AiInput, AiProvider, AiSession } from "./types.ts";
+import type {
+  AiClassifyInput,
+  AiInput,
+  AiProvider,
+  AiSession,
+} from "./types.ts";
 
 interface AnthropicSession extends AiSession {
   key: string;
@@ -82,6 +87,40 @@ export function createAnthropicProvider(
         max_tokens: 1,
         messages: [{ role: "user", content: "." }],
       });
+    },
+    async classify({
+      prompt,
+      image,
+      maxTokens,
+    }: AiClassifyInput): Promise<string> {
+      // No system prompt, no history, no tools and — importantly — no extended
+      // thinking: this is a polled label lookup, and a thinking budget would
+      // both blow past `maxTokens` and cost far more than the answer is worth.
+      const res = await client.messages.create({
+        model: cfg.model,
+        max_tokens: maxTokens,
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "image",
+                source: {
+                  type: "base64",
+                  // Safe: the route validated mimetype against this same set.
+                  media_type: image.mimeType as AnthropicImageMediaType,
+                  data: image.bytes.toString("base64"),
+                },
+              },
+              { type: "text", text: prompt },
+            ],
+          },
+        ],
+      });
+      return res.content
+        .map((block) => (block.type === "text" ? block.text : ""))
+        .join("")
+        .trim();
     },
     async *stream(
       { prompt, image }: AiInput,

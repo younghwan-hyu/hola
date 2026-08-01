@@ -38,6 +38,11 @@ TTS PCM 청크 ──appendPcm──▶ StreamingPcmPlayer
   `playGesture()`로 재생합니다. 규약은 루트 `README.md`의 "제스처 커맨드" 참고.
 - **입력**: 하단 바의 텍스트 입력(Enter 전송, Shift+Enter 줄바꿈, 한글 IME 대응)과
   마이크 녹음(`src/components/Recorder.tsx`).
+- **판정 폴링**: 카메라가 켜져 있는 동안 `src/lib/perception.ts`가 서버에서 받아온
+  체크 목록을 각자의 주기로 돌립니다. 저해상도 프레임을 보내고 `signal`이 실려오면
+  그 문장을 `hidden` 턴으로 대화 파이프라인에 넣어 아바타가 **먼저 말을 겁니다**
+  (사용자 말풍선은 표시되지 않음). 체크 종류에 대해 제네릭하므로 서버에 체크를
+  추가해도 이 코드는 그대로입니다. 규약은 루트 `README.md`의 "판정 경로" 참고.
 
 ## 아바타 모델
 

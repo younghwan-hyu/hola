@@ -40,6 +40,11 @@ import {
   pickInitialAvatar,
   storeAvatar,
 } from "@/lib/avatars";
+import {
+  fetchPerceptionChecks,
+  runPerceptionCheck,
+  type PerceptionCheckInfo,
+} from "@/lib/perception";
 import { GESTURES, isAvatarGesture, type AvatarGesture } from "@/lib/gestures";
 import { base64ToArrayBuffer, StreamingPcmPlayer } from "@/lib/audio";
 
@@ -120,7 +125,26 @@ export default function App() {
   // crop. null until the first `loadedmetadata` (falls back to 16:9).
   const [previewAspect, setPreviewAspect] = useState<number | null>(null);
 
+  // Perception checks the server wants polled while the camera is on.
+  const [perceptionChecks, setPerceptionChecks] = useState<
+    PerceptionCheckInfo[]
+  >([]);
+
   const playerRef = useRef<StreamingPcmPlayer>(new StreamingPcmPlayer());
+  // Read inside the polling timer, which must not restart on every render.
+  const busyRef = useRef(busy);
+  busyRef.current = busy;
+  /**
+   * Per-check trigger state. `count` debounces (see `consecutive`) and `armed`
+   * limits the avatar to ONE prompt per episode.
+   *
+   * Only a real user turn re-arms it (`send` clears this map) — merely
+   * reappearing on camera does not, or stepping in and out of frame without
+   * saying anything would have the avatar asking "어디 가셨어요?" over and over.
+   */
+  const perceptionState = useRef(
+    new Map<string, { label: string; count: number; armed: boolean }>(),
+  );
   // aiId of a turn whose voice the user stopped, so late-arriving tts_chunks
   // don't reappend audio or resurrect its stop button.
   const stoppedTurnRef = useRef<string | null>(null);
@@ -252,14 +276,18 @@ export default function App() {
     }
   };
 
-  // Capture the current preview frame as a downscaled JPEG (long edge 1024px).
-  // Not mirrored — the model gets the real scene. null if the video isn't ready.
-  const captureFrame = async (): Promise<Blob | null> => {
+  // Capture the current preview frame as a downscaled JPEG. Not mirrored — the
+  // model gets the real scene. null if the video isn't ready. Perception polling
+  // passes a much smaller size/quality than a conversation turn does.
+  const captureFrame = async (
+    maxPx = 1024,
+    quality = 0.8,
+  ): Promise<Blob | null> => {
     const video = cameraVideoRef.current;
     if (!video || video.readyState < 2 || video.videoWidth === 0) return null;
     const scale = Math.min(
       1,
-      1024 / Math.max(video.videoWidth, video.videoHeight),
+      maxPx / Math.max(video.videoWidth, video.videoHeight),
     );
     const w = Math.round(video.videoWidth * scale);
     const h = Math.round(video.videoHeight * scale);
@@ -270,7 +298,7 @@ export default function App() {
     if (!ctx) return null;
     ctx.drawImage(video, 0, 0, w, h);
     return await new Promise((resolve) =>
-      canvas.toBlob((b) => resolve(b), "image/jpeg", 0.8),
+      canvas.toBlob((b) => resolve(b), "image/jpeg", quality),
     );
   };
 
@@ -298,6 +326,18 @@ export default function App() {
       if (cancelled) return;
       setAvatars(list);
       setAvatar(pickInitialAvatar(list));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // What to poll while the camera is on. Discovered from the server so a new
+  // check needs no client change; [] (feature off) if it can't be reached.
+  useEffect(() => {
+    let cancelled = false;
+    void fetchPerceptionChecks().then((checks) => {
+      if (!cancelled) setPerceptionChecks(checks);
     });
     return () => {
       cancelled = true;
@@ -349,8 +389,20 @@ export default function App() {
     setSpeakingId(null);
   };
 
-  const send = async (payload: { text?: string; audio?: Blob }) => {
+  const send = async (payload: {
+    text?: string;
+    audio?: Blob;
+    /**
+     * Machine-initiated turn (a perception signal): the text is a sensor token
+     * for the model, not something the user said, so no user bubble is shown.
+     * The avatar's reply renders as a normal AI bubble.
+     */
+    hidden?: boolean;
+  }) => {
     if (busy) return;
+    // A turn the user actually initiated re-arms every perception check: having
+    // asked once, the avatar waits for an answer rather than asking again.
+    if (!payload.hidden) perceptionState.current.clear();
     setBusy(true);
     setSpeakingId(null);
     stoppedTurnRef.current = null;
@@ -361,17 +413,23 @@ export default function App() {
 
     // Camera on: capture a fresh frame first so the user bubble can show it as a
     // thumbnail. A failed capture must not block the message.
-    const image = cameraOn
-      ? ((await captureFrame().catch(() => null)) ?? undefined)
-      : undefined;
+    //
+    // Machine-initiated (hidden) turns deliberately send NO frame: a perception
+    // check already looked, and handing the model a picture of the empty room
+    // makes it describe the scene instead of speaking to the absent user.
+    const image =
+      cameraOn && !payload.hidden
+        ? ((await captureFrame().catch(() => null)) ?? undefined)
+        : undefined;
+    // No bubble for a hidden turn, so don't mint an object URL nothing revokes.
     let imageUrl: string | undefined;
-    if (image) {
+    if (image && !payload.hidden) {
       imageUrl = URL.createObjectURL(image);
       objectUrls.current.add(imageUrl);
     }
 
     // Text input: the user message is known now (audio: added on the stt event).
-    if (payload.text && payload.text.length > 0) {
+    if (!payload.hidden && payload.text && payload.text.length > 0) {
       const text = payload.text;
       setItems((prev) =>
         addBubble(prev, { id: userId, role: "user", text, imageUrl }),
@@ -379,7 +437,12 @@ export default function App() {
     }
 
     try {
-      const handle = await startChat({ ...payload, image });
+      // `hidden` is client-only — don't leak it into the request.
+      const handle = await startChat({
+        text: payload.text,
+        audio: payload.audio,
+        image,
+      });
 
       if (audioSupported && handle.config.audio.encoding === "PCM") {
         player.configure({
@@ -480,6 +543,55 @@ export default function App() {
       );
     }
   };
+
+  // One tick of one perception check. Kept in a ref and reassigned every render
+  // so the timer below always calls the current closure (fresh `send`) without
+  // being torn down and restarted.
+  const perceptionTickRef = useRef<
+    ((check: PerceptionCheckInfo) => Promise<void>) | null
+  >(null);
+  perceptionTickRef.current = async (check) => {
+    // Never poll while a turn is in flight (the avatar is mid-sentence) or the
+    // tab is hidden: both would waste calls, and a nudge must not interleave
+    // with the user's own turn.
+    if (busyRef.current || document.hidden) return;
+    const frame = await captureFrame(check.frameMaxPx, check.frameQuality).catch(
+      () => null,
+    );
+    if (!frame) return;
+    const verdict = await runPerceptionCheck(check.name, frame);
+    // Re-check: a turn may have started while the request was in flight.
+    if (!verdict || busyRef.current) return;
+
+    const prev = perceptionState.current.get(check.name);
+    const count = prev?.label === verdict.label ? prev.count + 1 : 1;
+    // Stays disarmed until the user actually answers (see perceptionState).
+    const armed = prev?.armed ?? true;
+    const fires = Boolean(verdict.signal) && armed && count >= check.consecutive;
+    perceptionState.current.set(check.name, {
+      label: verdict.label,
+      count,
+      armed: armed && !fires,
+    });
+    if (fires && verdict.signal) {
+      void send({ text: verdict.signal, hidden: true });
+    }
+  };
+
+  // Poll each check on its own interval while the camera is on.
+  useEffect(() => {
+    if (!cameraOn || perceptionChecks.length === 0) return;
+    const timers = perceptionChecks.map((check) =>
+      window.setInterval(() => {
+        void perceptionTickRef.current?.(check);
+      }, check.intervalMs),
+    );
+    return () => {
+      for (const t of timers) window.clearInterval(t);
+      // Start clean next time the camera comes on.
+      perceptionState.current.clear();
+    };
+  }, [cameraOn, perceptionChecks]);
 
   const onSubmit = (e: FormEvent) => {
     e.preventDefault();

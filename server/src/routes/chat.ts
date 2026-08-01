@@ -7,6 +7,7 @@ import type { SttProvider } from "../stt/index.ts";
 import type { TtsProvider } from "../tts/index.ts";
 import { runPipeline } from "../pipeline/pipeline.ts";
 import { SessionRegistry } from "../pipeline/session.ts";
+import { imageProblem } from "../util/image.ts";
 import { attachSse } from "../util/sse.ts";
 
 interface Deps {
@@ -17,13 +18,6 @@ interface Deps {
   tts: TtsProvider;
 }
 
-/** Image MIME types accepted for camera frames (aligns with Anthropic media_type). */
-const ALLOWED_IMAGE_TYPES = [
-  "image/jpeg",
-  "image/png",
-  "image/gif",
-  "image/webp",
-];
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024; // 8MB cap on camera frames.
 
 export function createChatRouter(deps: Deps): Router {
@@ -55,14 +49,9 @@ export function createChatRouter(deps: Deps): Router {
       }
 
       if (image) {
-        if (!ALLOWED_IMAGE_TYPES.includes(image.mimetype)) {
-          res
-            .status(400)
-            .json({ error: `unsupported image type: ${image.mimetype}` });
-          return;
-        }
-        if (image.size > MAX_IMAGE_BYTES) {
-          res.status(400).json({ error: "image too large (max 8MB)" });
+        const problem = imageProblem(image, MAX_IMAGE_BYTES);
+        if (problem) {
+          res.status(400).json({ error: problem });
           return;
         }
       }

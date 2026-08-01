@@ -19,6 +19,7 @@
 - **제스처**: AI 응답에 섞인 `{gesture=NAME}` 커맨드를 서버가 파싱해 음성 텍스트와 분리, `gesture` 이벤트로 전송 → 브라우저가 아바타 제스처 재생 (아래 [제스처 커맨드](#제스처-커맨드))
 - **RAG(문서 검색)**: 업로드한 텍스트 문서를 로컬 임베딩(pgvector)으로 저장하고, AI가 `search_documents` 도구로 검색해 답변 근거로 활용 (아래 [RAG](#rag-문서-검색))
 - **카메라 비전**: 카메라를 켜면 대화 전송(텍스트·음성) 시 현재 프레임을 캡처해 이미지와 함께 전송, AI가 실시간 장면을 인식 (아래 [카메라 비전](#카메라-비전))
+- **판정(perception)**: 카메라가 켜져 있는 동안 브라우저가 주기적으로 저해상도 프레임을 보내 "사람이 보이는지" 같은 단발 판정만 받고, 조건이 걸리면 아바타가 **먼저 말을 겁니다**. 대화 파이프라인과 분리된 경량 경로 (아래 [판정 경로](#판정-경로-perception))
 
 > ⚠️ TTS 포맷은 기본값 **PCM** 입니다. Google streaming TTS는 OGG_OPUS도 지원하지만 Chrome의 MSE byte stream에는 OGG 컨테이너가 없어 청크 append가 안 됩니다. PCM이면 `AudioBufferSourceNode`로 청크별 스케줄링이 깔끔하게 됩니다. 대역폭이 중요한 경우 `TTS_AUDIO_ENCODING=OGG_OPUS`로 바꾸고 클라이언트에 wasm Opus 디코더를 붙이면 됩니다.
 
@@ -26,7 +27,7 @@
 
 ```
 .
-├── server/         # TypeScript + Express, STT/AI/TTS/임베딩 provider 추상화 + RAG
+├── server/         # TypeScript + Express, STT/AI/TTS/임베딩 provider 추상화 + RAG + 판정 체크
 ├── web/            # Vite + React + three.js VRM 아바타 (립싱크/제스처), Web Audio 청크 재생
 └── compose.yml     # server + web + db(pgvector) + embeddings(ollama) 한 번에 띄우기
 ```
@@ -155,6 +156,11 @@ multipart/form-data. `text` 또는 `audio` 중 최소 하나 필수, `image`는 
 - `GET /api/documents` — 저장된 문서 목록 `[{ id, filename, chunkCount, uploadedAt }]` (camelCase — POST 응답의 snake_case와 다름).
 - `DELETE /api/documents/:id` — 문서와 청크 삭제 (204).
 
+### 판정 API (perception)
+
+- `GET /api/perception` — 브라우저가 돌려야 할 체크 목록. `[{ name, intervalMs, consecutive, frameMaxPx, frameQuality }]` (프롬프트·트리거 문구는 서버에만 있음).
+- `POST /api/perception/:name` — multipart `image` (≤2MB). 응답 `{ label, signal? }`. `signal`은 아바타가 말을 걸어야 하는 판정일 때만 실리는 상태 알림 문장. 없는 체크는 404, 프로바이더 오류는 502.
+
 ## RAG (문서 검색)
 
 웹의 **"문서 업로드"** 버튼(입력 바 확장 시 표시)으로 텍스트 파일을 올리면, 서버가 문장/문단 경계 기준으로 청킹하고 **로컬 임베딩 모델**로 벡터화해 **pgvector**에 저장합니다. 임베딩은 외부 API가 아니라 compose의 `embeddings`(Ollama) 컨테이너에서 직접 구동됩니다.
@@ -177,6 +183,54 @@ AI에게는 `search_documents` **tool**이 주어집니다. 사용자가 업로�
 - **히스토리 정책**: 이 앱은 대화 히스토리를 매 호출 전체 재전송(stateless API)하므로, 이미지가 쌓이면 매 턴 재전송·재과금됩니다. 그래서 provider가 **가장 최근 이미지 1장만 유지**하고 이전 이미지 파트는 `"[이전 카메라 캡처 — 생략됨]"` 텍스트로 치환합니다 (`server/src/ai/{openai,anthropic}.ts`).
 - **모델 요구**: `AI_MODEL`이 **vision(이미지 입력) 지원 모델**이어야 합니다. 미지원이면 카메라 턴은 SSE `error` 이벤트로 실패합니다(폴백 없음).
 - **브라우저**: `getUserMedia`는 secure context 필요 — localhost는 OK, 원격 http 배포에선 동작 안 함.
+
+## 판정 경로 (perception)
+
+카메라가 켜져 있는 동안, 브라우저는 대화와 **별개로** 주기적으로 프레임을 보내 단발 판정을 받습니다. 지금 등록된 체크는 `presence`(사용자가 카메라 앞에 있는가) 하나이고, 사라진 게 확인되면 아바타가 먼저 "어디 가셨어요?" 하고 말을 겁니다.
+
+```
+카메라 ON
+  │
+  ├─[3초 타이머] 256px 프레임 ─▶ POST /api/perception/presence ─▶ AI 단발 호출
+  │                                                (히스토리 X, 툴 X, 스트리밍 X, 출력 8토큰)
+  │                                                             │
+  │                                          label=absent → signal 이 실려오면 ↓
+  │                                                             │
+  └─[사용자 발화] ────────────▶ POST /api/chat ◀────────────────┘
+                                    │        (상태 알림 1턴 주입 — 화면엔 안 보임)
+                                    ▼
+                     STT → AI(세션/히스토리) → TTS → SSE → 아바타 발화
+```
+
+- **대화를 오염시키지 않음**: 판정 호출은 `AiProvider.classify()`로, 시스템 프롬프트·히스토리·툴·스트리밍 없이 이미지 1장과 짧은 질문만 보내고 라벨 몇 토큰만 받습니다. 서버의 대화 세션은 건드리지 않으므로 3초마다 히스토리가 불어나거나 재과금되지 않습니다. OpenAI는 `detail: "low"`로 이미지 토큰이 정액이고, Anthropic은 확장 사고를 끕니다.
+- **행동 규칙은 시스템 프롬프트에**: 주입되는 턴은 `(perception: 사용자가 카메라 화면에서 사라졌습니다)` 같은 **상태 알림**일 뿐, "이렇게 말해라"는 지시가 아닙니다. 어떻게 반응할지는 각 체크의 `guidance`가 갖고 있고 `withPerceptionGuidance()`가 시스템 프롬프트 뒤에 합성합니다. user 턴에 지시를 실어 보내면 최신 모델이 이를 무시하거나 되묻습니다.
+- **말 거는 순간에만 합류**: 트리거가 걸리면 클라이언트가 `POST /api/chat`에 알림 한 턴을 넣습니다. 그 뒤로는 평소 대화와 동일해서 TTS·립싱크·제스처가 그대로 붙고, 사용자가 자연스럽게 대답할 수 있습니다. 알림은 **화면에 사용자 말풍선으로 표시되지 않고**(AI 답변만 보임), 서버 히스토리에는 남아 후속 대화의 문맥이 됩니다. 이 턴은 카메라 프레임을 함께 보내지 않습니다 — 빈 방 사진을 주면 모델이 사용자에게 말을 거는 대신 장면을 묘사합니다.
+- **보채지 않음**: 한 번 말을 걸면 **사용자가 실제로 응답할 때까지** 다시 걸지 않습니다(`armed` 플래그). 화면에 다시 나타나는 것만으로는 재무장되지 않습니다 — 그러면 말없이 들락날락할 때마다 "어디 가셨어요?"를 반복하게 됩니다. 재무장은 사용자가 직접 보낸 턴(텍스트·음성)에서만 일어납니다. 대화 턴이 진행 중이거나 탭이 백그라운드면 폴링 자체를 멈춥니다.
+
+### 체크 추가하기
+
+`server/src/perception/<name>.ts`에 팩토리 하나를 쓰고 `createPerceptionChecks()`에 등록하면 끝입니다. 라우트도, 브라우저 폴링 루프도 이 인터페이스에 대해 제네릭이라 **클라이언트 수정이 필요 없습니다**.
+
+```ts
+export function createPresenceCheck(): PerceptionCheck {
+  return {
+    name: "presence",
+    intervalMs: 3000,
+    consecutive: 1,        // 몇 회 연속 걸려야 실행할지 (1 = 즉시)
+    frameMaxPx: 256,       // 판정용 프레임은 작게
+    frameQuality: 0.5,
+    prompt: '...사람이 보이면 "present", 없으면 "absent"라고만 답하라.',
+    labels: ["present", "absent"],  // labels[0]은 파싱 실패 시 폴백 → 반드시 무해한 쪽
+    // 라벨 → 대화에 주입할 "상태 알림" (지시문이 아님)
+    triggers: { absent: "(perception: 사용자가 카메라 화면에서 사라졌습니다)" },
+    // 그 알림에 어떻게 반응할지 — 시스템 프롬프트에 합성됨
+    guidance: "- 사용자가 카메라 화면에서 사라졌다는 알림이 오면: 어디 갔는지 묻는 짧은 한 문장만 말하라.",
+    maxTokens: 8,
+  };
+}
+```
+
+> ⚠️ **비용**: 카메라를 켜 둔 채 방치하면 3초마다 vision 호출이 나갑니다. 주기를 늘리려면 `intervalMs`를, 아예 끄려면 `createPerceptionChecks()`에서 빼세요. `AI_MODEL`은 카메라 기능과 마찬가지로 vision 지원 모델이어야 합니다.
 
 ## AI 대화 세션
 
