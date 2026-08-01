@@ -41,17 +41,29 @@ TTS PCM 청크 ──appendPcm──▶ StreamingPcmPlayer
 
 ## 아바타 모델
 
-기본 모델은 pixiv 공식 샘플 VRM(1.0)이 `public/avatar.vrm`에 포함되어 있습니다
-(`aa/ih/ou/ee/oh` 입모양 + 깜빡임 표정 보유, ~10MB).
+기본 모델은 pixiv 공식 샘플 VRM(1.0)이 `public/girl.vrm`에 포함되어 있습니다
+(`aa/ih/ou/ee/oh` 입모양 + 깜빡임 표정 보유, ~10MB). 두 번째 선택지로 VRoid 샘플
+`public/Sakurada_Fumiriya.vrm`(VRM 0.x, CC0, ~19MB)이 함께 들어 있습니다.
 
-다른 모델로 바꾸려면:
+화면에서 바로 바꿀 수 있습니다: 하단 바 확장 → 사람 아이콘 버튼 → **아바타 모달**에서
+고르면 즉시 교체되고(기존 VRM은 `deepDispose`로 정리), 고른 모델은
+`localStorage`(`hola.avatarUrl`)에 남아 새로고침해도 유지됩니다.
 
-- `public/avatar.vrm`을 교체하거나,
-- 환경변수 `VITE_AVATAR_URL`로 다른 `.vrm` 경로/URL 지정.
+선택 목록은 **`public/avatars.json`** 한 파일이 전부이며, 앱이 **런타임에 fetch**합니다
+(`src/lib/avatars.ts`). 빌드에 값이 박히지 않으므로 **모델 추가에 재빌드가 필요 없습니다** —
+`.vrm`을 `public/`에 넣고 목록에 경로만 추가한 뒤 페이지를 새로고침하면 됩니다.
 
-```bash
-VITE_AVATAR_URL=/my-avatar.vrm npm run dev
+```json
+["/girl.vrm", "/Sakurada_Fumiriya.vrm"]
 ```
+
+- 첫 항목이 기본값이고, 메뉴 표시 이름은 **확장자를 뗀 파일명**입니다
+  (`/girl.vrm` → `girl`). 표시 이름을 바꾸려면 파일명을 바꾸세요.
+- 외부 URL도 넣을 수 있습니다(해당 origin의 CORS 허용 필요).
+- 매니페스트가 없거나 깨져 있으면 경고를 남기고 `/girl.vrm`로 폴백하므로 아바타는
+  항상 뜹니다.
+- 컨테이너에서는 이미지에 구워지지만, 재빌드 없이 이 파일만 볼륨으로 덮어써도 됩니다:
+  `-v ./avatars.json:/usr/share/nginx/html/avatars.json:ro`
 
 > VRM 0.x / 1.0 모두 동작합니다. three-vrm가 VRM0의 `A/I/U/E/O` 블렌드셰이프를
 > 1.0의 `aa/ih/ou/ee/oh` 프리셋으로 정규화하므로 립싱크 코드는 양쪽 모두에 통합니다.
@@ -59,7 +71,9 @@ VITE_AVATAR_URL=/my-avatar.vrm npm run dev
 
 ## 에셋 출처 (크레딧)
 
-- 기본 아바타 `public/avatar.vrm` — pixiv 공식 샘플 VRM (1.0).
+- 기본 아바타 `public/girl.vrm` — pixiv 공식 샘플 VRM (1.0).
+- 아바타 `public/Sakurada_Fumiriya.vrm` — VRoid Studio 샘플 모델, **CC0**
+  ([madjin/vrm-samples](https://github.com/madjin/vrm-samples) `vroid/beta`).
 - 해 모델 `public/sun.glb` (`show_sunny` 제스처) — **"Sun" by Poly by Google**,
   **CC-BY 3.0** ([Poly Pizza](https://poly.pizza/m/77wHkzwlpOq)). CC-BY는 출처 표기가
   필요하므로 새 에셋으로 교체하지 않는 한 이 크레딧을 유지하세요.

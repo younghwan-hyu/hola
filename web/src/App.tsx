@@ -7,6 +7,7 @@ import {
 } from "react";
 import {
   Camera,
+  Check,
   ChevronDown,
   FileUp,
   Loader2,
@@ -15,6 +16,7 @@ import {
   Smile,
   Square,
   SwitchCamera,
+  UserRound,
   X,
 } from "lucide-react";
 
@@ -32,10 +34,14 @@ import {
   uploadDocument,
   type ChatEvent,
 } from "@/lib/api";
+import {
+  avatarLabel,
+  fetchAvatars,
+  pickInitialAvatar,
+  storeAvatar,
+} from "@/lib/avatars";
 import { GESTURES, isAvatarGesture, type AvatarGesture } from "@/lib/gestures";
 import { base64ToArrayBuffer, StreamingPcmPlayer } from "@/lib/audio";
-
-const AVATAR_URL = import.meta.env.VITE_AVATAR_URL ?? "/avatar.vrm";
 
 type Role = "user" | "ai";
 
@@ -90,6 +96,13 @@ export default function App() {
   // Chat as a rolling window of at most MAX_BUBBLES message bubbles (user & ai).
   const [items, setItems] = useState<Bubble[]>([]);
   const [gestureOpen, setGestureOpen] = useState(false);
+  // Avatar list, fetched from public/avatars.json on mount (see lib/avatars.ts).
+  const [avatars, setAvatars] = useState<string[]>([]);
+  // URL of the selected VRM model; null until the manifest resolves. Changing it
+  // reloads <Avatar> (avatarUrl is its effect dep), which re-reports
+  // "loading" -> "ready" on its own.
+  const [avatar, setAvatar] = useState<string | null>(null);
+  const [avatarOpen, setAvatarOpen] = useState(false);
   // Input is voice-first: collapsed shows a row of mic + file + camera + "...";
   // expanding reveals the full bar (text input + gesture + send).
   const [expanded, setExpanded] = useState(false);
@@ -273,6 +286,21 @@ export default function App() {
       if (stream) for (const t of stream.getTracks()) t.stop();
       for (const u of objectUrls.current) URL.revokeObjectURL(u);
       objectUrls.current.clear();
+    };
+  }, []);
+
+  // Resolve the avatar list at runtime, then show the last-picked model (or the
+  // first entry). Until this lands the avatar isn't mounted, so the "loading"
+  // overlay that's already up just stays until the VRM itself is ready.
+  useEffect(() => {
+    let cancelled = false;
+    void fetchAvatars().then((list) => {
+      if (cancelled) return;
+      setAvatars(list);
+      setAvatar(pickInitialAvatar(list));
+    });
+    return () => {
+      cancelled = true;
     };
   }, []);
 
@@ -473,6 +501,13 @@ export default function App() {
     setGestureOpen(false);
   };
 
+  const selectAvatar = (url: string) => {
+    setAvatarOpen(false);
+    if (url === avatar) return;
+    setAvatar(url);
+    storeAvatar(url);
+  };
+
   // Fit the preview inside PREVIEW_MAX_W x PREVIEW_MAX_H, keeping the real ratio:
   // width-bound for wide streams, height-bound (narrower) for tall ones.
   const previewRatio = previewAspect ?? 16 / 9;
@@ -482,17 +517,19 @@ export default function App() {
 
   return (
     <div className="relative h-full w-full overflow-hidden bg-[radial-gradient(ellipse_at_center,_hsl(222_47%_13%)_0%,_hsl(222_84%_5%)_70%)]">
-      {/* 3D avatar fills the viewport */}
+      {/* 3D avatar fills the viewport (mounted once the manifest resolves) */}
       <div className="absolute inset-0">
-        <Avatar
-          ref={avatarRef}
-          avatarUrl={AVATAR_URL}
-          getMouthLevel={() => playerRef.current.getLevel()}
-          onStatus={(status, message) => {
-            setAvatarStatus(status);
-            setAvatarError(message ?? null);
-          }}
-        />
+        {avatar && (
+          <Avatar
+            ref={avatarRef}
+            avatarUrl={avatar}
+            getMouthLevel={() => playerRef.current.getLevel()}
+            onStatus={(status, message) => {
+              setAvatarStatus(status);
+              setAvatarError(message ?? null);
+            }}
+          />
+        )}
       </div>
 
       {/* Avatar loading / error overlay */}
@@ -732,6 +769,17 @@ export default function App() {
               type="button"
               variant="outline"
               size="icon"
+              title="아바타 선택"
+              className="h-11 w-11 shrink-0"
+              onClick={() => setAvatarOpen(true)}
+            >
+              <UserRound className="h-4 w-4" />
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="icon"
+              title="제스처"
               className="h-11 w-11 shrink-0"
               onClick={() => setGestureOpen(true)}
             >
@@ -755,6 +803,49 @@ export default function App() {
             </Button>
           </div>
         </form>
+      )}
+
+      {/* Avatar picker modal — renders public/avatars.json (lib/avatars.ts) */}
+      {avatarOpen && (
+        <div
+          className="absolute inset-0 z-10 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm"
+          onClick={() => setAvatarOpen(false)}
+        >
+          <div
+            className="relative w-full max-w-xs rounded-2xl border border-white/10 bg-zinc-900/95 p-5 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              type="button"
+              onClick={() => setAvatarOpen(false)}
+              className="absolute right-3 top-3 text-white/50 transition-colors hover:text-white"
+            >
+              <X className="h-5 w-5" />
+            </button>
+            <h2 className="mb-4 text-base font-semibold text-white">아바타</h2>
+            <div className="flex flex-col gap-2">
+              {avatars.map((url) => {
+                const selected = url === avatar;
+                return (
+                  <Button
+                    key={url}
+                    type="button"
+                    variant={selected ? "default" : "secondary"}
+                    className="h-12 justify-start gap-3 text-sm"
+                    onClick={() => selectAvatar(url)}
+                  >
+                    {selected ? (
+                      <Check className="h-5 w-5 shrink-0" />
+                    ) : (
+                      <UserRound className="h-5 w-5 shrink-0" />
+                    )}
+                    <span className="truncate">{avatarLabel(url)}</span>
+                  </Button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Gesture modal */}

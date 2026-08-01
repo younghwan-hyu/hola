@@ -4,7 +4,7 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { VRMUtils, type VRM } from "@pixiv/three-vrm";
 
-import { loadVrm } from "@/lib/vrm";
+import { getArmDownSign, loadVrm } from "@/lib/vrm";
 import { GESTURE_DURATION, type AvatarGesture } from "@/lib/gestures";
 
 export type { AvatarGesture };
@@ -17,7 +17,7 @@ export interface AvatarHandle {
 }
 
 interface Props {
-  /** URL of the .vrm model (default avatar lives at /avatar.vrm). */
+  /** URL of the .vrm model (default avatar lives at /girl.vrm). */
   avatarUrl: string;
   /**
    * Returns the current audible loudness (RMS, ~0..0.3) of the TTS playback.
@@ -50,7 +50,9 @@ const CAMERA_DISTANCE = 2.2;
 
 // Per-gesture durations live in lib/gestures.ts (GESTURE_DURATION).
 
-// Right-arm rest rotations — must match setRelaxedPose() in lib/vrm.ts.
+// Right-arm rest rotations — must match setRelaxedPose() in lib/vrm.ts. Like
+// every z rotation below they are stated in the VRM1 convention and scaled by
+// getArmDownSign(vrm) at runtime, since a VRM0 rig's arms rotate the other way.
 const REST_UPPER_Z = THREE.MathUtils.degToRad(72);
 const REST_LOWER_Z = THREE.MathUtils.degToRad(8);
 // Raised "waving" pose for the right arm (radians). Everything is kept in the
@@ -182,6 +184,7 @@ export const Avatar = forwardRef<AvatarHandle, Props>(function Avatar(
     let rightUpperArm: THREE.Object3D | null = null;
     let rightLowerArm: THREE.Object3D | null = null;
     let rightHand: THREE.Object3D | null = null;
+    let armSign = 1; // see getArmDownSign(); +1 for VRM1 rigs, -1 for VRM0 ones
     let sun: THREE.Group | null = null; // the show_sunny gesture sun (hidden until played)
     let sunLight: THREE.PointLight | null = null;
     let sunBaseY = SUN_FALLBACK_POS.y; // refined to head height once the VRM loads
@@ -282,6 +285,7 @@ export const Avatar = forwardRef<AvatarHandle, Props>(function Avatar(
           loaded.humanoid?.getNormalizedBoneNode("rightLowerArm") ?? null;
         rightHand =
           loaded.humanoid?.getNormalizedBoneNode("rightHand") ?? null;
+        armSign = getArmDownSign(loaded);
 
         // Make the avatar follow the camera with its gaze.
         if (loaded.lookAt) loaded.lookAt.target = camera;
@@ -401,12 +405,12 @@ export const Avatar = forwardRef<AvatarHandle, Props>(function Avatar(
           rightUpperArm.rotation.set(
             0,
             0,
-            REST_UPPER_Z + (WAVE_UPPER_Z - REST_UPPER_Z) * waveAmt,
+            (REST_UPPER_Z + (WAVE_UPPER_Z - REST_UPPER_Z) * waveAmt) * armSign,
           );
           rightLowerArm.rotation.set(
             0,
             0,
-            REST_LOWER_Z + (WAVE_LOWER_Z - REST_LOWER_Z) * waveAmt,
+            (REST_LOWER_Z + (WAVE_LOWER_Z - REST_LOWER_Z) * waveAmt) * armSign,
           );
           if (rightHand) rightHand.rotation.set(0, 0, 0);
           // Orient the arm in world space. The palm-forward twist is split

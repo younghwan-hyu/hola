@@ -43,6 +43,31 @@ export async function loadVrm(url: string, scene: THREE.Scene): Promise<VRM> {
 }
 
 /**
+ * Which way `rotation.z` has to go to LOWER this model's arms: `+1` when a
+ * positive angle lowers the right arm (VRM1 convention), `-1` when it raises it.
+ *
+ * three-vrm's normalized bones keep the model-space rest offsets, and VRM 0.x
+ * faces -Z where VRM 1.0 faces +Z — so a VRM0 rig's right arm extends toward
+ * +X and a VRM1 rig's toward -X. The very same `rotation.z` therefore lowers the
+ * arms on one model and throws them up in the air on the other. Read the sign
+ * off the rig geometry (normalized bone positions are offsets from the parent
+ * bone, i.e. shoulder -> elbow here) and only fall back to the spec version when
+ * the arms aren't out to the sides to read it from.
+ *
+ * Anything rotating the arm bones about z — {@link setRelaxedPose} and the wave
+ * gesture in Avatar.tsx — must scale its angles by this.
+ */
+export function getArmDownSign(vrm: VRM): number {
+  const elbow = vrm.humanoid?.getNormalizedBoneNode("rightLowerArm");
+  // |x| is ~0.2m on a T-posed rig; much less means the arms already hang down
+  // (or the rig is unusual), so the offset direction isn't meaningful.
+  if (elbow && Math.abs(elbow.position.x) > 0.01) {
+    return elbow.position.x > 0 ? -1 : 1;
+  }
+  return vrm.meta?.metaVersion === "0" ? -1 : 1;
+}
+
+/**
  * Lowers the arms from the default T-pose into a relaxed "standing still" pose.
  *
  * Operates on the normalized humanoid bones (consistent for VRM0 and VRM1), so
@@ -53,8 +78,9 @@ export function setRelaxedPose(vrm: VRM): void {
   const humanoid = vrm.humanoid;
   if (!humanoid) return;
 
-  const ARM_DOWN = THREE.MathUtils.degToRad(72); // T-pose -> arms near the sides
-  const ELBOW = THREE.MathUtils.degToRad(8); // tiny inward bend so hands aren't rigid
+  const sign = getArmDownSign(vrm);
+  const ARM_DOWN = THREE.MathUtils.degToRad(72) * sign; // T-pose -> arms near the sides
+  const ELBOW = THREE.MathUtils.degToRad(8) * sign; // tiny inward bend so hands aren't rigid
 
   const leftUpperArm = humanoid.getNormalizedBoneNode("leftUpperArm");
   const rightUpperArm = humanoid.getNormalizedBoneNode("rightUpperArm");
