@@ -4,11 +4,13 @@ import Anthropic from "@anthropic-ai/sdk";
 
 import type { AiConfig } from "../config.ts";
 import { MAX_TOOL_STEPS, callTool, type Tool } from "../tools/index.ts";
-import type {
-  AiClassifyInput,
-  AiInput,
-  AiProvider,
-  AiSession,
+import {
+  CAMERA_IMAGE_LABEL,
+  DOCUMENT_IMAGE_LABEL,
+  type AiClassifyInput,
+  type AiInput,
+  type AiProvider,
+  type AiSession,
 } from "./types.ts";
 
 interface AnthropicSession extends AiSession {
@@ -23,36 +25,58 @@ type AnthropicImageMediaType =
   | "image/gif"
   | "image/webp";
 
-/** Placeholder swapped in for an evicted (stale) camera image in history. */
-const IMG_PLACEHOLDER = "[이전 카메라 캡처 — 생략됨]";
+/** Placeholder swapped in for an evicted (stale) capture image in history. */
+const IMG_PLACEHOLDER = "[이전 캡처 — 생략됨]";
+
+/** base64 image block for a captured frame (camera or doc-viewer page). */
+function toImageBlock(img: {
+  bytes: Buffer;
+  mimeType: string;
+}): Anthropic.ImageBlockParam {
+  return {
+    type: "image",
+    source: {
+      type: "base64",
+      // Safe: the route validated mimetype against this same set.
+      media_type: img.mimeType as AnthropicImageMediaType,
+      data: img.bytes.toString("base64"),
+    },
+  };
+}
 
 /**
- * Return a copy of `history` keeping at most the single most recent camera image
- * (0 if this turn already carries a fresh image); older image blocks become a
- * text block so re-sending the full history doesn't resend stale base64 frames.
+ * Return a copy of `history` where stale capture images become a text block, so
+ * re-sending the full history doesn't resend stale base64 frames. The most
+ * recent image-bearing user message keeps its images (a doc capture and a
+ * camera frame sent together form one snapshot of that moment) — unless the
+ * current turn carries fresh images, in which case no history image survives.
  * Works on a shallow copy (cloning only the user messages it edits) so the live
  * session history is never mutated — a turn that throws before it commits must
- * leave the previously retained image intact. (tool_result user messages carry
+ * leave the previously retained images intact. (tool_result user messages carry
  * no image blocks, so they're untouched.)
  */
 function pruneAnthropicImages(
   history: Anthropic.MessageParam[],
-  currentTurnHasImage: boolean,
+  currentTurnHasImages: boolean,
 ): Anthropic.MessageParam[] {
   const copy = history.map((msg) =>
     msg.role === "user" && Array.isArray(msg.content)
       ? { ...msg, content: [...msg.content] }
       : msg,
   );
-  let budget = currentTurnHasImage ? 0 : 1;
+  let keepNewest = !currentTurnHasImages;
   for (let i = copy.length - 1; i >= 0; i--) {
     const msg = copy[i];
     if (!msg || msg.role !== "user" || !Array.isArray(msg.content)) continue;
-    for (let j = msg.content.length - 1; j >= 0; j--) {
+    if (!msg.content.some((b) => b?.type === "image")) continue;
+    if (keepNewest) {
+      keepNewest = false;
+      continue;
+    }
+    for (let j = 0; j < msg.content.length; j++) {
       const block = msg.content[j];
-      if (!block || block.type !== "image") continue;
-      if (budget > 0) budget--;
-      else msg.content[j] = { type: "text", text: IMG_PLACEHOLDER };
+      if (block?.type === "image")
+        msg.content[j] = { type: "text", text: IMG_PLACEHOLDER };
     }
   }
   return copy;
@@ -123,31 +147,38 @@ export function createAnthropicProvider(
         .trim();
     },
     async *stream(
-      { prompt, image }: AiInput,
+      { prompt, image, document }: AiInput,
       session: AiSession,
     ): AsyncIterable<string> {
       // `session` is always one this provider issued via createSession().
       const s = session as AnthropicSession;
       // Evict stale images from a COPY of history (committed only on success).
-      const history = pruneAnthropicImages(s.history, image !== undefined);
-      // Anthropic recommends placing the image before the text.
-      const userMessage: Anthropic.MessageParam = image
-        ? {
-            role: "user",
-            content: [
-              {
-                type: "image",
-                source: {
-                  type: "base64",
-                  // Safe: the route validated mimetype against this same set.
-                  media_type: image.mimeType as AnthropicImageMediaType,
-                  data: image.bytes.toString("base64"),
-                },
-              },
-              { type: "text", text: prompt },
-            ],
-          }
-        : { role: "user", content: prompt };
+      const history = pruneAnthropicImages(
+        s.history,
+        image !== undefined || document !== undefined,
+      );
+      // Anthropic recommends placing images before the text. Each attached
+      // image is preceded by its label text block so the model can tell the
+      // doc-viewer capture from the camera frame (see ./types.ts).
+      const blocks: Array<Anthropic.TextBlockParam | Anthropic.ImageBlockParam> =
+        [];
+      if (document) {
+        blocks.push(
+          { type: "text", text: DOCUMENT_IMAGE_LABEL },
+          toImageBlock(document),
+        );
+      }
+      if (image) {
+        blocks.push(
+          { type: "text", text: CAMERA_IMAGE_LABEL },
+          toImageBlock(image),
+        );
+      }
+      blocks.push({ type: "text", text: prompt });
+      const userMessage: Anthropic.MessageParam =
+        blocks.length > 1
+          ? { role: "user", content: blocks }
+          : { role: "user", content: prompt };
       const messages: Anthropic.MessageParam[] = [...history, userMessage];
 
       // Agentic loop: stream text, and whenever the model stops on tool_use,

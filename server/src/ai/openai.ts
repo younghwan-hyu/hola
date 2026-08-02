@@ -4,11 +4,13 @@ import OpenAI from "openai";
 
 import type { AiConfig } from "../config.ts";
 import { MAX_TOOL_STEPS, callTool, type Tool } from "../tools/index.ts";
-import type {
-  AiClassifyInput,
-  AiInput,
-  AiProvider,
-  AiSession,
+import {
+  CAMERA_IMAGE_LABEL,
+  DOCUMENT_IMAGE_LABEL,
+  type AiClassifyInput,
+  type AiInput,
+  type AiProvider,
+  type AiSession,
 } from "./types.ts";
 
 interface OpenAiSession extends AiSession {
@@ -16,35 +18,54 @@ interface OpenAiSession extends AiSession {
   history: OpenAI.Chat.ChatCompletionMessageParam[];
 }
 
-/** Placeholder swapped in for an evicted (stale) camera image in history. */
-const IMG_PLACEHOLDER = "[이전 카메라 캡처 — 생략됨]";
+/** Placeholder swapped in for an evicted (stale) capture image in history. */
+const IMG_PLACEHOLDER = "[이전 캡처 — 생략됨]";
+
+/** data-URL image part for a captured frame (camera or doc-viewer page). */
+function toImagePart(img: {
+  bytes: Buffer;
+  mimeType: string;
+}): OpenAI.Chat.ChatCompletionContentPart {
+  return {
+    type: "image_url",
+    image_url: {
+      url: `data:${img.mimeType};base64,${img.bytes.toString("base64")}`,
+    },
+  };
+}
 
 /**
- * Return a copy of `history` keeping at most the single most recent camera image
- * (0 if this turn already carries a fresh image); older image parts become a
- * text placeholder so re-sending the full history doesn't resend stale base64
- * frames. Works on a shallow copy (cloning only the user messages it edits) so
- * the live session history is never mutated — a turn that throws before it
- * commits must leave the previously retained image intact.
+ * Return a copy of `history` where stale capture images become a text
+ * placeholder, so re-sending the full history doesn't resend stale base64
+ * frames. The most recent image-bearing user message keeps its images (a doc
+ * capture and a camera frame sent together form one snapshot of that moment) —
+ * unless the current turn carries fresh images, in which case no history image
+ * survives. Works on a shallow copy (cloning only the user messages it edits)
+ * so the live session history is never mutated — a turn that throws before it
+ * commits must leave the previously retained images intact.
  */
 function pruneOpenAiImages(
   history: OpenAI.Chat.ChatCompletionMessageParam[],
-  currentTurnHasImage: boolean,
+  currentTurnHasImages: boolean,
 ): OpenAI.Chat.ChatCompletionMessageParam[] {
   const copy = history.map((msg) =>
     msg.role === "user" && Array.isArray(msg.content)
       ? { ...msg, content: [...msg.content] }
       : msg,
   );
-  let budget = currentTurnHasImage ? 0 : 1;
+  let keepNewest = !currentTurnHasImages;
   for (let i = copy.length - 1; i >= 0; i--) {
     const msg = copy[i];
     if (!msg || msg.role !== "user" || !Array.isArray(msg.content)) continue;
-    for (let j = msg.content.length - 1; j >= 0; j--) {
+    if (!msg.content.some((p) => p?.type === "image_url")) continue;
+    if (keepNewest) {
+      keepNewest = false;
+      continue;
+    }
+    for (let j = 0; j < msg.content.length; j++) {
       const part = msg.content[j];
-      if (!part || part.type !== "image_url") continue;
-      if (budget > 0) budget--;
-      else msg.content[j] = { type: "text", text: IMG_PLACEHOLDER };
+      if (part?.type === "image_url")
+        msg.content[j] = { type: "text", text: IMG_PLACEHOLDER };
     }
   }
   return copy;
@@ -113,27 +134,37 @@ export function createOpenAiProvider(
       return res.choices[0]?.message?.content?.trim() ?? "";
     },
     async *stream(
-      { prompt, image }: AiInput,
+      { prompt, image, document }: AiInput,
       session: AiSession,
     ): AsyncIterable<string> {
       // `session` is always one this provider issued via createSession().
       const s = session as OpenAiSession;
       // Evict stale images from a COPY of history (committed only on success).
-      const history = pruneOpenAiImages(s.history, image !== undefined);
-      const userMessage: OpenAI.Chat.ChatCompletionMessageParam = image
-        ? {
-            role: "user",
-            content: [
-              { type: "text", text: prompt },
-              {
-                type: "image_url",
-                image_url: {
-                  url: `data:${image.mimeType};base64,${image.bytes.toString("base64")}`,
-                },
-              },
-            ],
-          }
-        : { role: "user", content: prompt };
+      const history = pruneOpenAiImages(
+        s.history,
+        image !== undefined || document !== undefined,
+      );
+      // Each attached image is preceded by its label text part so the model can
+      // tell the doc-viewer capture from the camera frame (see ./types.ts).
+      const parts: OpenAI.Chat.ChatCompletionContentPart[] = [
+        { type: "text", text: prompt },
+      ];
+      if (document) {
+        parts.push(
+          { type: "text", text: DOCUMENT_IMAGE_LABEL },
+          toImagePart(document),
+        );
+      }
+      if (image) {
+        parts.push(
+          { type: "text", text: CAMERA_IMAGE_LABEL },
+          toImagePart(image),
+        );
+      }
+      const userMessage: OpenAI.Chat.ChatCompletionMessageParam =
+        parts.length > 1
+          ? { role: "user", content: parts }
+          : { role: "user", content: prompt };
       const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
         { role: "system", content: cfg.systemPrompt },
         ...history,

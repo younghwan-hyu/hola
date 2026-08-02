@@ -34,6 +34,7 @@ export function createChatRouter(deps: Deps): Router {
     upload.fields([
       { name: "audio", maxCount: 1 },
       { name: "image", maxCount: 1 },
+      { name: "document", maxCount: 1 },
     ]),
     (req, res) => {
       const text =
@@ -43,17 +44,22 @@ export function createChatRouter(deps: Deps): Router {
         | undefined;
       const file = files?.audio?.[0];
       const image = files?.image?.[0];
+      // Doc-viewer mode: a capture of the PDF page the user is looking at.
+      const docImage = files?.document?.[0];
 
       if (!text && !file) {
         res.status(400).json({ error: "either `text` or `audio` is required" });
         return;
       }
 
-      if (image) {
-        const problem = imageProblem(image, MAX_IMAGE_BYTES);
-        if (problem) {
-          res.status(400).json({ error: problem });
-          return;
+      // Both capture parts (camera frame, doc-viewer page) are images.
+      for (const capture of [image, docImage]) {
+        if (capture) {
+          const problem = imageProblem(capture, MAX_IMAGE_BYTES);
+          if (problem) {
+            res.status(400).json({ error: problem });
+            return;
+          }
         }
       }
 
@@ -85,6 +91,9 @@ export function createChatRouter(deps: Deps): Router {
             : undefined,
           image: image
             ? { bytes: image.buffer, mimeType: image.mimetype }
+            : undefined,
+          document: docImage
+            ? { bytes: docImage.buffer, mimeType: docImage.mimetype }
             : undefined,
         },
         {

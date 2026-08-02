@@ -2,12 +2,27 @@ export interface AiInput {
   prompt: string;
   /**
    * Optional image captured from the user's camera this turn. Passed to the
-   * model as a multimodal user message. The provider keeps only the most recent
-   * image in history (older ones are replaced with a placeholder) since the full
-   * history is re-sent on every call.
+   * model as a multimodal user message. Providers keep only the most recent
+   * image-bearing turn's images in history (older ones are replaced with a
+   * placeholder) since the full history is re-sent on every call.
    */
   image?: { bytes: Buffer; mimeType: string };
+  /**
+   * Optional capture of the document (PDF) page currently open in the web
+   * client's doc-viewer mode. May accompany `image`; each attached image is
+   * preceded by its label text part (below) so the model can tell a camera
+   * frame from a document page. Pruned from history the same way as `image`.
+   */
+  document?: { bytes: Buffer; mimeType: string };
 }
+
+/**
+ * Labels emitted as their own text part directly before each attached image.
+ * The system prompt (./system-prompt.ts) explains them to the model; both
+ * providers insert them when building multimodal user content.
+ */
+export const CAMERA_IMAGE_LABEL = "[카메라]";
+export const DOCUMENT_IMAGE_LABEL = "[문서 화면]";
 
 /** A one-shot look at an image, outside of any conversation. */
 export interface AiClassifyInput {

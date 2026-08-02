@@ -30,6 +30,8 @@ export async function startChat(input: {
   text?: string;
   audio?: Blob;
   image?: Blob;
+  /** 문서 조회 모드: capture of the PDF page currently on screen. */
+  document?: Blob;
 }): Promise<ChatHandle> {
   const fd = new FormData();
   if (input.text !== undefined) fd.append("text", input.text);
@@ -38,6 +40,7 @@ export async function startChat(input: {
     fd.append("audio", input.audio, `audio.${ext}`);
   }
   if (input.image) fd.append("image", input.image, "camera.jpg");
+  if (input.document) fd.append("document", input.document, "document.jpg");
   const res = await fetch("/api/chat", { method: "POST", body: fd });
   if (!res.ok) {
     throw new Error(
