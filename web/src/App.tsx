@@ -138,20 +138,36 @@ export default function App() {
   >([]);
 
   const playerRef = useRef<StreamingPcmPlayer>(new StreamingPcmPlayer());
-  // Read inside the polling timer, which must not restart on every render.
-  const busyRef = useRef(busy);
-  busyRef.current = busy;
   /**
-   * Per-check trigger state. `count` debounces (see `consecutive`) and `armed`
-   * limits the avatar to ONE prompt per episode.
-   *
-   * Only a real user turn re-arms it (`send` clears this map) — merely
-   * reappearing on camera does not, or stepping in and out of frame without
-   * saying anything would have the avatar asking "어디 가셨어요?" over and over.
+   * A turn is starting or streaming. `busy` state drives the UI, but state is
+   * async — two callers in the same tick both read it as `false`, so a
+   * perception nudge landing exactly as the user hits send would open two
+   * overlapping turns. This ref flips synchronously, so whoever gets here first
+   * owns the turn; the polling timer also reads it without having to restart on
+   * every render.
    */
+  const turnInFlight = useRef(false);
+  /**
+   * ONE arm shared by every perception check, not one per check: whichever
+   * check speaks first silences all of them, so the avatar can never stack
+   * "어디 가셨어요?" and "뭘 보고 계세요?" on top of each other.
+   *
+   * Only a real user turn re-arms it (see `send`) — merely reappearing on
+   * camera does not, or stepping in and out of frame without saying anything
+   * would have the avatar asking over and over. Also cleared while the camera
+   * is off, so a verdict still in flight can't nudge after the preview is gone.
+   */
+  const perceptionArmed = useRef(true);
+  /** Per-check debounce state: how many equal verdicts in a row (`consecutive`). */
   const perceptionState = useRef(
-    new Map<string, { label: string; count: number; armed: boolean }>(),
+    new Map<string, { label: string; count: number }>(),
   );
+  /**
+   * Serializes ticks across checks: at most one classify call in flight, so two
+   * checks can neither race each other into a verdict nor bill two vision calls
+   * at the same instant.
+   */
+  const perceptionTicking = useRef(false);
   // aiId of a turn whose voice the user stopped, so late-arriving tts_chunks
   // don't reappend audio or resurrect its stop button.
   const stoppedTurnRef = useRef<string | null>(null);
@@ -409,10 +425,14 @@ export default function App() {
      */
     hidden?: boolean;
   }) => {
-    if (busy) return;
-    // A turn the user actually initiated re-arms every perception check: having
-    // asked once, the avatar waits for an answer rather than asking again.
-    if (!payload.hidden) perceptionState.current.clear();
+    if (turnInFlight.current) return;
+    turnInFlight.current = true;
+    // A turn the user actually initiated re-arms perception: having asked once,
+    // the avatar waits for an answer rather than asking again.
+    if (!payload.hidden) {
+      perceptionArmed.current = true;
+      perceptionState.current.clear();
+    }
     setBusy(true);
     setSpeakingId(null);
     stoppedTurnRef.current = null;
@@ -420,6 +440,12 @@ export default function App() {
     const userId = `${turnId}:u`;
     const aiId = `${turnId}:a`;
     const player = playerRef.current;
+    // Release the turn lock together with the UI's busy flag — they must never
+    // drift apart, or the next send() is refused forever.
+    const endTurn = () => {
+      turnInFlight.current = false;
+      setBusy(false);
+    };
 
     // Camera on: capture a fresh frame first so the user bubble can show it as a
     // thumbnail. A failed capture must not block the message.
@@ -493,7 +519,7 @@ export default function App() {
       };
       const onAiError = (message: string) => {
         player.finish();
-        setBusy(false);
+        endTurn();
         // Don't clear speakingId here: any TTS already buffered keeps playing,
         // so leave the stop button up (the drain effect hides it once the audio
         // finishes) rather than removing the only control while it's audible.
@@ -548,7 +574,7 @@ export default function App() {
               return;
             case "done":
               player.finish();
-              setBusy(false);
+              endTurn();
               return;
             case "error":
               onAiError(ev.message);
@@ -561,7 +587,7 @@ export default function App() {
         },
       );
     } catch (e) {
-      setBusy(false);
+      endTurn();
       const message = e instanceof Error ? e.message : "request failed";
       setItems((prev) =>
         addBubble(prev, { id: aiId, role: "ai", text: "", error: message }),
@@ -578,34 +604,46 @@ export default function App() {
   perceptionTickRef.current = async (check) => {
     // Never poll while a turn is in flight (the avatar is mid-sentence) or the
     // tab is hidden: both would waste calls, and a nudge must not interleave
-    // with the user's own turn.
-    if (busyRef.current || document.hidden) return;
-    const frame = await captureFrame(check.frameMaxPx, check.frameQuality).catch(
-      () => null,
-    );
-    if (!frame) return;
-    const verdict = await runPerceptionCheck(check.name, frame);
-    // Re-check: a turn may have started while the request was in flight.
-    if (!verdict || busyRef.current) return;
+    // with the user's own turn. Disarmed means some check already spoke and is
+    // waiting on the user, so skip the call entirely rather than paying for a
+    // verdict nothing may act on.
+    if (turnInFlight.current || document.hidden || !perceptionArmed.current)
+      return;
+    // One check at a time, whichever check that is (see perceptionTicking).
+    if (perceptionTicking.current) return;
+    perceptionTicking.current = true;
+    try {
+      const frame = await captureFrame(
+        check.frameMaxPx,
+        check.frameQuality,
+      ).catch(() => null);
+      if (!frame) return;
+      const verdict = await runPerceptionCheck(check.name, frame);
+      // Re-check: a turn may have started, another check may have spoken, or
+      // the camera may have gone off while the request was in flight.
+      if (!verdict || turnInFlight.current || !perceptionArmed.current) return;
 
-    const prev = perceptionState.current.get(check.name);
-    const count = prev?.label === verdict.label ? prev.count + 1 : 1;
-    // Stays disarmed until the user actually answers (see perceptionState).
-    const armed = prev?.armed ?? true;
-    const fires = Boolean(verdict.signal) && armed && count >= check.consecutive;
-    perceptionState.current.set(check.name, {
-      label: verdict.label,
-      count,
-      armed: armed && !fires,
-    });
-    if (fires && verdict.signal) {
-      void send({ text: verdict.signal, hidden: true });
+      const prev = perceptionState.current.get(check.name);
+      const count = prev?.label === verdict.label ? prev.count + 1 : 1;
+      perceptionState.current.set(check.name, { label: verdict.label, count });
+      if (verdict.signal && count >= check.consecutive) {
+        // Disarm synchronously, before send() yields: from here on every other
+        // check bails at the guard above, so only this one nudge goes out.
+        perceptionArmed.current = false;
+        void send({ text: verdict.signal, hidden: true });
+      }
+    } finally {
+      perceptionTicking.current = false;
     }
   };
 
-  // Poll each check on its own interval while the camera is on.
+  // Poll each check on its own interval while the camera is on. The checks are
+  // independent here, but they share one arm, so together they still nudge at
+  // most once (see perceptionArmed / the tick above).
   useEffect(() => {
     if (!cameraOn || perceptionChecks.length === 0) return;
+    perceptionArmed.current = true;
+    perceptionState.current.clear();
     const timers = perceptionChecks.map((check) =>
       window.setInterval(() => {
         void perceptionTickRef.current?.(check);
@@ -613,7 +651,9 @@ export default function App() {
     );
     return () => {
       for (const t of timers) window.clearInterval(t);
-      // Start clean next time the camera comes on.
+      // Start clean next time the camera comes on — and stay disarmed until
+      // then, so a verdict still in flight can't nudge with the camera off.
+      perceptionArmed.current = false;
       perceptionState.current.clear();
     };
   }, [cameraOn, perceptionChecks]);
@@ -621,7 +661,10 @@ export default function App() {
   const onSubmit = (e: FormEvent) => {
     e.preventDefault();
     const text = input.trim();
-    if (!text || busy) return;
+    // turnInFlight, not `busy`: if a perception nudge grabbed the turn a moment
+    // ago the button may not be disabled yet, and send() would drop this text
+    // after the input had already been cleared.
+    if (!text || turnInFlight.current) return;
     setInput("");
     void send({ text });
   };

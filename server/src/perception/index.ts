@@ -1,4 +1,5 @@
 import type { AiProvider } from "../ai/index.ts";
+import { createAttentionCheck } from "./attention.ts";
 import { createPresenceCheck } from "./presence.ts";
 import type {
   PerceptionCheck,
@@ -12,9 +13,16 @@ import type {
  * To add one: write `./<name>.ts` exporting a factory that returns a
  * {@link PerceptionCheck}, then list it here. Nothing else needs to change —
  * the route serves it and the client discovers it from `GET /api/perception`.
+ *
+ * Checks run independently, but the avatar only ever speaks ONCE per episode:
+ * the client arms every registered check together and disarms them all as soon
+ * as one nudges, so two checks can never stack two remarks on top of each other
+ * (see `perceptionArmed` in web/src/App.tsx). Design a new check's labels to be
+ * disjoint from the existing ones anyway — whichever one wins the race should
+ * be the one that actually fits the frame.
  */
 export function createPerceptionChecks(): PerceptionCheck[] {
-  return [createPresenceCheck()];
+  return [createPresenceCheck(), createAttentionCheck()];
 }
 
 /** Explains the `(perception: ...)` signals before the per-check rules. */

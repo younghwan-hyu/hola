@@ -17,10 +17,10 @@ export function createPresenceCheck(): PerceptionCheck {
   return {
     name: "presence",
     intervalMs: 3000,
-    // Two in a row (~6s): a face-level check flickers on ordinary moments — a
-    // glance down at the keyboard, a turn to a second monitor — and nudging the
-    // user for those reads as nagging. Drop to 1 to speak up on the first frame.
-    consecutive: 2,
+    // Speak up on the first frame without a face. Note a face-level check does
+    // flicker on ordinary moments — a glance down at the keyboard, a turn to a
+    // second monitor — so raise this to 2 (~6s) if the nudges feel trigger-happy.
+    consecutive: 1,
     // A face is still easy to spot at low resolution, and OpenAI bills a "low
     // detail" image at a flat token rate — keep the polling frame small.
     frameMaxPx: 256,
