@@ -20,6 +20,14 @@ interface Props {
   /** URL of the .vrm model (default avatar lives at /girl.vrm). */
   avatarUrl: string;
   /**
+   * How far back (metres) the camera sits in the default framing; defaults to
+   * {@link CAMERA_DISTANCE}. Smaller = a closer, more face-filling shot — pass a
+   * smaller value when the avatar is shown in a short pane. Changing it
+   * re-frames in place (no scene rebuild, no model reload), and the user can
+   * still dolly between OrbitControls' min/maxDistance afterwards.
+   */
+  cameraDistance?: number;
+  /**
    * Returns the current audible loudness (RMS, ~0..0.3) of the TTS playback.
    * Read every frame to drive the mouth. Returns 0 when silent.
    */
@@ -44,8 +52,9 @@ const BLINK_DURATION = 0.12; // seconds for a full close+open
 const VOWELS = ["ih", "ou", "ee", "oh"] as const;
 
 // How far the camera sits back from the avatar's head (metres) in the initial
-// framing. Larger = more zoomed out. The user can still dolly in/out between
-// OrbitControls' min/maxDistance.
+// framing, when the `cameraDistance` prop doesn't override it. Larger = more
+// zoomed out. The user can still dolly in/out between OrbitControls'
+// min/maxDistance.
 const CAMERA_DISTANCE = 2.2;
 
 // Per-gesture durations live in lib/gestures.ts (GESTURE_DURATION).
@@ -152,10 +161,15 @@ async function loadFloatingModel(
 }
 
 export const Avatar = forwardRef<AvatarHandle, Props>(function Avatar(
-  { avatarUrl, getMouthLevel, onStatus },
+  { avatarUrl, cameraDistance = CAMERA_DISTANCE, getMouthLevel, onStatus },
   ref,
 ) {
   const containerRef = useRef<HTMLDivElement>(null);
+  // Read by frameAvatar() below, which the setup effect installs into
+  // reframeRef — so a distance change never restarts the scene.
+  const distanceRef = useRef(cameraDistance);
+  distanceRef.current = cameraDistance;
+  const reframeRef = useRef<(() => void) | null>(null);
   // Keep the latest callbacks without restarting the render loop.
   const levelRef = useRef(getMouthLevel);
   levelRef.current = getMouthLevel;
@@ -188,6 +202,7 @@ export const Avatar = forwardRef<AvatarHandle, Props>(function Avatar(
     let sun: THREE.Group | null = null; // the show_sunny gesture sun (hidden until played)
     let sunLight: THREE.PointLight | null = null;
     let sunBaseY = SUN_FALLBACK_POS.y; // refined to head height once the VRM loads
+    let headBone: THREE.Object3D | null = null; // set once the VRM loads
 
     const width = container.clientWidth || 1;
     const height = container.clientHeight || 1;
@@ -201,7 +216,6 @@ export const Avatar = forwardRef<AvatarHandle, Props>(function Avatar(
     const scene = new THREE.Scene();
 
     const camera = new THREE.PerspectiveCamera(30, width / height, 0.1, 20);
-    camera.position.set(0, 1.45, CAMERA_DISTANCE);
 
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
@@ -209,8 +223,31 @@ export const Avatar = forwardRef<AvatarHandle, Props>(function Avatar(
     controls.minDistance = 0.8;
     controls.maxDistance = 6;
     controls.maxPolarAngle = Math.PI * 0.95;
-    controls.target.set(0, 1.3, 0);
-    controls.update();
+
+    /**
+     * Default framing: `distanceRef` metres in front of the head, aimed a touch
+     * below it so the avatar sits low in frame with headroom above. Falls back
+     * to nominal head height until the VRM has loaded.
+     *
+     * Called again whenever the distance prop changes (see the effect below the
+     * setup one), which resets any manual orbit/dolly — a layout change wants a
+     * fresh frame more than it wants to preserve a stale one.
+     */
+    const frameAvatar = () => {
+      const distance = distanceRef.current;
+      if (headBone) {
+        const headPos = new THREE.Vector3();
+        headBone.getWorldPosition(headPos);
+        camera.position.set(headPos.x, headPos.y + 0.05, headPos.z + distance);
+        controls.target.set(headPos.x, headPos.y - 0.1, headPos.z);
+      } else {
+        camera.position.set(0, 1.45, distance);
+        controls.target.set(0, 1.3, 0);
+      }
+      controls.update();
+    };
+    frameAvatar();
+    reframeRef.current = frameAvatar;
 
     // Lighting: a soft three-point-ish setup.
     const key = new THREE.DirectionalLight(0xffffff, 2.2);
@@ -290,20 +327,15 @@ export const Avatar = forwardRef<AvatarHandle, Props>(function Avatar(
         // Make the avatar follow the camera with its gaze.
         if (loaded.lookAt) loaded.lookAt.target = camera;
 
-        // Frame the upper body with headroom: raise the whole camera rig so the
-        // avatar sits lower in frame, leaving empty space above the head.
+        // Now that the real head height is known, re-frame on it (frameAvatar
+        // was working off the nominal height until this point).
         const head = loaded.humanoid?.getNormalizedBoneNode("head");
         if (head) {
+          headBone = head;
+          frameAvatar();
+
           const headPos = new THREE.Vector3();
           head.getWorldPosition(headPos);
-          camera.position.set(
-            headPos.x,
-            headPos.y + 0.05,
-            headPos.z + CAMERA_DISTANCE,
-          );
-          controls.target.set(headPos.x, headPos.y - 0.1, headPos.z);
-          controls.update();
-
           // Anchor the sunny-gesture sun up and in front of the head.
           if (sun) {
             sun.position.set(
@@ -497,6 +529,7 @@ export const Avatar = forwardRef<AvatarHandle, Props>(function Avatar(
 
     return () => {
       disposed = true;
+      reframeRef.current = null;
       cancelAnimationFrame(rafId);
       resizeObserver.disconnect();
       controls.dispose();
@@ -511,6 +544,13 @@ export const Avatar = forwardRef<AvatarHandle, Props>(function Avatar(
       }
     };
   }, [avatarUrl]);
+
+  // Re-frame when the distance prop changes — deliberately NOT a dep of the
+  // setup effect above, which would tear down the scene and reload the VRM
+  // (a visible "아바타 불러오는 중…" flash) just to move the camera.
+  useEffect(() => {
+    reframeRef.current?.();
+  }, [cameraDistance]);
 
   return <div ref={containerRef} className="h-full w-full" />;
 });

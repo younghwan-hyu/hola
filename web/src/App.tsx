@@ -12,8 +12,10 @@ import {
   ChevronDown,
   FileUp,
   Loader2,
+  MessageSquare,
   MoreHorizontal,
   Send,
+  Settings,
   Smile,
   Square,
   SwitchCamera,
@@ -48,6 +50,12 @@ import {
   type PerceptionCheckInfo,
 } from "@/lib/perception";
 import { GESTURES, isAvatarGesture, type AvatarGesture } from "@/lib/gestures";
+import {
+  BUBBLE_MODES,
+  loadBubbleMode,
+  storeBubbleMode,
+  type BubbleMode,
+} from "@/lib/settings";
 import { base64ToArrayBuffer, StreamingPcmPlayer } from "@/lib/audio";
 
 type Role = "user" | "ai";
@@ -61,37 +69,23 @@ interface Bubble {
   imageUrl?: string;
   /** Object URL of the doc-page capture sent with this turn (문서 조회 모드). */
   docUrl?: string;
-  /** true while the bubble is sliding up and out, just before removal. */
-  leaving?: boolean;
 }
 
 const newId = () => Math.random().toString(36).slice(2, 10);
 
-const MAX_BUBBLES = 2; // most bubbles visible at once
-const EXIT_MS = 350; // keep a leaving bubble around this long for its exit anim
+const MAX_BUBBLES = 2; // bubbles the inline mode shows at once
+const EXIT_MS = 350; // how long a bubble that left the inline window animates out
+
+// 분리 모드 gives the log and the input the lower part of the column, so the 3D
+// pane is roughly half as tall — pull the camera in (default is 2.2m, see
+// Avatar's CAMERA_DISTANCE) so the face doesn't shrink with it. Smaller = closer.
+const SEPARATE_CAMERA_DISTANCE = 1.5;
 
 // The camera preview fits inside this box while preserving the real stream
 // ratio: landscape streams fill the width, portrait streams are bounded by the
 // height (so they shrink in width) instead of growing oversized in the corner.
-const PREVIEW_MAX_W = 208; // px (was the fixed w-52 width)
-const PREVIEW_MAX_H = 240; // px
-
-/**
- * Append a bubble to the rolling window. Once at capacity, the oldest still-live
- * bubble is marked `leaving` (kept in the list so it can animate up and out) —
- * so exactly one bubble leaves whenever a new one (user OR ai) appears.
- */
-function addBubble(prev: Bubble[], next: Bubble): Bubble[] {
-  const leaving = prev.filter((b) => b.leaving);
-  const live = prev.filter((b) => !b.leaving);
-  const combined = [...live, next];
-  if (combined.length <= MAX_BUBBLES) return [...leaving, ...combined];
-  const overflow = combined.length - MAX_BUBBLES;
-  const newlyLeaving = combined
-    .slice(0, overflow)
-    .map((b) => ({ ...b, leaving: true }));
-  return [...leaving, ...newlyLeaving, ...combined.slice(overflow)];
-}
+const PREVIEW_MAX_W = 168; // px
+const PREVIEW_MAX_H = 192; // px
 
 export default function App() {
   const [audioSupported] = useState(() => StreamingPcmPlayer.isSupported());
@@ -102,8 +96,21 @@ export default function App() {
   // id of the AI bubble whose TTS audio is currently playing — drives the small
   // stop button under that bubble. null when nothing is speaking.
   const [speakingId, setSpeakingId] = useState<string | null>(null);
-  // Chat as a rolling window of at most MAX_BUBBLES message bubbles (user & ai).
-  const [items, setItems] = useState<Bubble[]>([]);
+  /**
+   * Every message of this browser session, oldest first. Nothing is dropped and
+   * nothing is ever fetched from the server — reloading the page starts over.
+   * Inline mode renders a rolling window of the last MAX_BUBBLES; separate mode
+   * scrolls the whole thing.
+   */
+  const [messages, setMessages] = useState<Bubble[]>([]);
+  /** Inline (over the 3D view) vs separate (a scrollable log below it). */
+  const [bubbleMode, setBubbleMode] = useState<BubbleMode>(loadBubbleMode);
+  /**
+   * Inline mode only: ids that just fell out of the rolling window, kept
+   * mounted above it for EXIT_MS so they can animate up and away.
+   */
+  const [exitingIds, setExitingIds] = useState<string[]>([]);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [gestureOpen, setGestureOpen] = useState(false);
   // Avatar list, fetched from public/avatars.json on mount (see lib/avatars.ts).
   const [avatars, setAvatars] = useState<string[]>([]);
@@ -178,10 +185,16 @@ export default function App() {
   const cameraVideoRef = useRef<HTMLVideoElement | null>(null);
   const cameraStartingRef = useRef(false);
   const mountedRef = useRef(true);
-  // Live object URLs for sent-image thumbnails, revoked when their bubble leaves.
+  // Live object URLs for sent-image thumbnails. The session log keeps every
+  // message (and 분리 모드 scrolls back to it), so these are held until unmount.
   const objectUrls = useRef<Set<string>>(new Set());
   const toastTimer = useRef<number | null>(null);
-  const leavingTimers = useRef<Map<string, number>>(new Map());
+  const exitTimers = useRef<Map<string, number>>(new Map());
+  /** Ids the inline window showed on the previous pass (see the exit effect). */
+  const shownIds = useRef<string[]>([]);
+  /** Separate mode: the log's scroll box, and whether it's pinned to the newest. */
+  const logRef = useRef<HTMLDivElement>(null);
+  const stickToBottom = useRef(true);
 
   const flashToast = (msg: string) => {
     setToastMsg(msg);
@@ -331,8 +344,8 @@ export default function App() {
     return () => {
       mountedRef.current = false;
       playerRef.current.dispose();
-      for (const t of leavingTimers.current.values()) window.clearTimeout(t);
-      leavingTimers.current.clear();
+      for (const t of exitTimers.current.values()) window.clearTimeout(t);
+      exitTimers.current.clear();
       if (toastTimer.current !== null) window.clearTimeout(toastTimer.current);
       const stream = cameraStreamRef.current;
       if (stream) for (const t of stream.getTracks()) t.stop();
@@ -375,25 +388,43 @@ export default function App() {
     }
   }, [cameraOn]);
 
-  // Remove each leaving bubble after its exit animation. Scheduled exactly once
-  // per bubble (guarded by the ref) so streaming re-renders don't reset it.
+  /**
+   * Inline mode shows only the last MAX_BUBBLES. When a message drops out of
+   * that window, keep it mounted for EXIT_MS so it can animate up and away —
+   * `exitingIds` is exactly that set. Separate mode's window is "everything",
+   * so nothing ever exits there.
+   *
+   * Thumbnails are deliberately NOT revoked here: the message stays in the
+   * session log and is still scrollable in separate mode, so its object URLs
+   * have to outlive the inline window (they're released on unmount).
+   */
   useEffect(() => {
-    for (const b of items) {
-      if (b.leaving && !leavingTimers.current.has(b.id)) {
-        const timer = window.setTimeout(() => {
-          leavingTimers.current.delete(b.id);
-          for (const url of [b.imageUrl, b.docUrl]) {
-            if (url) {
-              URL.revokeObjectURL(url);
-              objectUrls.current.delete(url);
-            }
-          }
-          setItems((prev) => prev.filter((x) => x.id !== b.id));
-        }, EXIT_MS);
-        leavingTimers.current.set(b.id, timer);
-      }
+    const shown =
+      bubbleMode === "inline"
+        ? messages.slice(-MAX_BUBBLES).map((b) => b.id)
+        : [];
+    const gone = shownIds.current.filter((id) => !shown.includes(id));
+    shownIds.current = shown;
+    if (gone.length === 0) return;
+    setExitingIds((prev) => [...prev, ...gone.filter((id) => !prev.includes(id))]);
+    for (const id of gone) {
+      if (exitTimers.current.has(id)) continue;
+      const timer = window.setTimeout(() => {
+        exitTimers.current.delete(id);
+        setExitingIds((prev) => prev.filter((x) => x !== id));
+      }, EXIT_MS);
+      exitTimers.current.set(id, timer);
     }
-  }, [items]);
+  }, [messages, bubbleMode]);
+
+  // Separate mode: follow the newest message, unless the user has scrolled up
+  // to read back through the session.
+  useEffect(() => {
+    if (bubbleMode !== "separate") return;
+    const el = logRef.current;
+    if (!el || !stickToBottom.current) return;
+    el.scrollTop = el.scrollHeight;
+  }, [messages, bubbleMode, expanded]);
 
   // Once a turn is done (busy false), hide its stop button when the audio has
   // fully drained. Guarded by `busy` so brief mid-stream gaps don't clear it.
@@ -480,9 +511,10 @@ export default function App() {
     // Text input: the user message is known now (audio: added on the stt event).
     if (!payload.hidden && payload.text && payload.text.length > 0) {
       const text = payload.text;
-      setItems((prev) =>
-        addBubble(prev, { id: userId, role: "user", text, imageUrl, docUrl }),
-      );
+      setMessages((prev) => [
+        ...prev,
+        { id: userId, role: "user", text, imageUrl, docUrl },
+      ]);
     }
 
     try {
@@ -508,9 +540,9 @@ export default function App() {
       const onAiText = (text: string, append: boolean) => {
         if (!aiCreated) {
           aiCreated = true;
-          setItems((prev) => addBubble(prev, { id: aiId, role: "ai", text }));
+          setMessages((prev) => [...prev, { id: aiId, role: "ai", text }]);
         } else {
-          setItems((prev) =>
+          setMessages((prev) =>
             prev.map((b) =>
               b.id === aiId ? { ...b, text: append ? b.text + text : text } : b,
             ),
@@ -525,11 +557,12 @@ export default function App() {
         // finishes) rather than removing the only control while it's audible.
         if (!aiCreated) {
           aiCreated = true;
-          setItems((prev) =>
-            addBubble(prev, { id: aiId, role: "ai", text: "", error: message }),
-          );
+          setMessages((prev) => [
+            ...prev,
+            { id: aiId, role: "ai", text: "", error: message },
+          ]);
         } else {
-          setItems((prev) =>
+          setMessages((prev) =>
             prev.map((b) => (b.id === aiId ? { ...b, error: message } : b)),
           );
         }
@@ -542,15 +575,16 @@ export default function App() {
             case "stt":
               // For audio, the user bubble appears once the transcript is known.
               if (ev.source === "audio") {
-                setItems((prev) =>
-                  addBubble(prev, {
+                setMessages((prev) => [
+                  ...prev,
+                  {
                     id: userId,
                     role: "user",
                     text: ev.text,
                     imageUrl,
                     docUrl,
-                  }),
-                );
+                  },
+                ]);
               }
               return;
             case "gesture":
@@ -589,9 +623,10 @@ export default function App() {
     } catch (e) {
       endTurn();
       const message = e instanceof Error ? e.message : "request failed";
-      setItems((prev) =>
-        addBubble(prev, { id: aiId, role: "ai", text: "", error: message }),
-      );
+      setMessages((prev) => [
+        ...prev,
+        { id: aiId, role: "ai", text: "", error: message },
+      ]);
     }
   };
 
@@ -688,11 +723,264 @@ export default function App() {
     storeAvatar(url);
   };
 
+  const selectBubbleMode = (mode: BubbleMode) => {
+    setSettingsOpen(false);
+    if (mode === bubbleMode) return;
+    setBubbleMode(mode);
+    storeBubbleMode(mode);
+    // Show the newest message first thing when the log appears.
+    stickToBottom.current = true;
+  };
+
+  // Auto-scroll follows the newest message only while the log is (near) the
+  // bottom — scrolling up to read back must not get yanked away mid-stream.
+  const onLogScroll = () => {
+    const el = logRef.current;
+    if (!el) return;
+    stickToBottom.current =
+      el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+  };
+
   // Fit the preview inside PREVIEW_MAX_W x PREVIEW_MAX_H, keeping the real ratio:
   // width-bound for wide streams, height-bound (narrower) for tall ones.
   const previewRatio = previewAspect ?? 16 / 9;
   const previewW = Math.round(
     Math.min(PREVIEW_MAX_W, PREVIEW_MAX_H * previewRatio),
+  );
+
+  // Inline mode: the rolling window plus whatever is still animating out of it.
+  // Separate mode: the whole session log, oldest first.
+  const inlineIds = new Set(messages.slice(-MAX_BUBBLES).map((b) => b.id));
+  const inlineBubbles = messages.filter(
+    (b) => inlineIds.has(b.id) || exitingIds.includes(b.id),
+  );
+
+  /** One message bubble — identical in both modes, so both render through this. */
+  const renderBubble = (b: Bubble) => {
+    // Only inline mode retires bubbles; guard so a stale id left over from a
+    // mode switch can't fade a bubble out of the log and leave it invisible.
+    const leaving = bubbleMode === "inline" && exitingIds.includes(b.id);
+    return (
+      <div
+        key={b.id}
+        className={`flex ${
+          b.role === "user" ? "justify-end" : "justify-start"
+        } duration-300 ${
+          leaving
+            ? "animate-out fade-out-0 slide-out-to-top-4 fill-mode-forwards"
+            : "animate-in fade-in-0 slide-in-from-bottom-3"
+        }`}
+      >
+        {b.role === "user" ? (
+          <div className="max-w-[80%] rounded-2xl rounded-br-sm border border-white/15 bg-black/40 px-4 py-2 text-sm text-white shadow-lg backdrop-blur">
+            {(b.docUrl || b.imageUrl) && (
+              <div className="mb-1.5 flex flex-wrap items-center justify-center gap-1.5">
+                {b.docUrl && (
+                  <img
+                    src={b.docUrl}
+                    alt="첨부한 문서 화면"
+                    className="block max-h-24 w-auto max-w-full rounded-lg"
+                  />
+                )}
+                {b.imageUrl && (
+                  <img
+                    src={b.imageUrl}
+                    alt="첨부한 카메라 이미지"
+                    className="block max-h-24 w-auto max-w-full rounded-lg object-cover"
+                  />
+                )}
+              </div>
+            )}
+            {b.text.length > 0 && (
+              <p className="whitespace-pre-wrap break-words">{b.text}</p>
+            )}
+          </div>
+        ) : (
+          <div className="flex max-w-[80%] flex-col items-start gap-1">
+            <div className="rounded-2xl rounded-bl-sm border border-white/15 bg-black/40 px-4 py-2 text-sm leading-relaxed text-white shadow-lg backdrop-blur">
+              {b.text.length > 0 && (
+                <p className="whitespace-pre-wrap break-words">{b.text}</p>
+              )}
+              {b.error && (
+                <p className="mt-1 text-xs text-destructive">{b.error}</p>
+              )}
+            </div>
+            {speakingId === b.id && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => stopSpeaking(b.id)}
+                title="음성 중지"
+                aria-label="음성 중지"
+                className="pointer-events-auto h-8 gap-1.5 rounded-full border border-white/15 bg-black/50 px-3 text-xs text-white shadow-lg backdrop-blur hover:bg-black/70 hover:text-white"
+              >
+                <Square className="h-3.5 w-3.5 fill-current" />
+                중지
+              </Button>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // Voice-first input. Collapsed: mic + file upload + camera + "..." in a row;
+  // "..." reveals the full bar (text input + gesture + send). It floats over the
+  // 3D view in inline mode and sits under the log as a normal row in separate
+  // mode, so only the positioning classes differ.
+  const floatingInput = bubbleMode === "inline";
+  const inputBar = !expanded ? (
+    <div
+      className={`flex items-center justify-center gap-4 ${
+        floatingInput
+          ? "absolute inset-x-0 bottom-6"
+          : "shrink-0 border-t border-white/10 bg-black/20 py-4"
+      }`}
+    >
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".txt,.md,.markdown,text/plain,text/markdown"
+        className="hidden"
+        onChange={(e) => {
+          void onFilePicked(e.target.files?.[0]);
+          e.target.value = "";
+        }}
+      />
+      {/* Order: 문서(doc viewer) - 음성(mic) - 카메라(camera) - 파일(upload) - ...(more). */}
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        title={docMode ? "문서 조회 모드 끄기" : "문서 조회 모드"}
+        className={
+          docMode
+            ? "h-16 w-16 shrink-0 rounded-full bg-white text-black shadow-lg shadow-black/30 hover:bg-white/90 hover:text-black"
+            : "h-16 w-16 shrink-0 rounded-full border border-white/15 bg-black/40 text-white shadow-lg shadow-black/30 backdrop-blur hover:bg-black/55 hover:text-white"
+        }
+        onClick={() => setDocMode((v) => !v)}
+      >
+        <BookOpen className="h-6 w-6" />
+      </Button>
+      <Recorder
+        size="lg"
+        disabled={busy}
+        onCaptured={(blob) => void send({ audio: blob })}
+      />
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        title={cameraOn ? "카메라 끄기" : "카메라 켜기"}
+        className={
+          cameraOn
+            ? "h-16 w-16 shrink-0 rounded-full bg-white text-black shadow-lg shadow-black/30 hover:bg-white/90 hover:text-black"
+            : "h-16 w-16 shrink-0 rounded-full border border-white/15 bg-black/40 text-white shadow-lg shadow-black/30 backdrop-blur hover:bg-black/55 hover:text-white"
+        }
+        onClick={() => void toggleCamera()}
+      >
+        <Camera className="h-6 w-6" />
+      </Button>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        disabled={uploading}
+        title="문서 업로드"
+        className="h-16 w-16 shrink-0 rounded-full border border-white/15 bg-black/40 text-white shadow-lg shadow-black/30 backdrop-blur hover:bg-black/55 hover:text-white"
+        onClick={() => fileInputRef.current?.click()}
+      >
+        {uploading ? (
+          <Loader2 className="h-6 w-6 animate-spin" />
+        ) : (
+          <FileUp className="h-6 w-6" />
+        )}
+      </Button>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        className="h-12 w-12 shrink-0 rounded-full border border-white/15 bg-black/40 text-white shadow-lg shadow-black/30 backdrop-blur hover:bg-black/55 hover:text-white"
+        onClick={() => setExpanded(true)}
+      >
+        <MoreHorizontal className="h-5 w-5" />
+      </Button>
+    </div>
+  ) : (
+    <form
+      onSubmit={onSubmit}
+      className={`border-t border-white/10 bg-black/30 backdrop-blur ${
+        floatingInput ? "absolute inset-x-0 bottom-0" : "shrink-0"
+      }`}
+    >
+      <div className="mx-auto flex max-w-2xl items-end gap-2 p-3">
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="h-11 w-11 shrink-0 text-white/60 hover:text-white"
+          onClick={() => setExpanded(false)}
+        >
+          <ChevronDown className="h-4 w-4" />
+        </Button>
+        <Textarea
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={onKeyDown}
+          placeholder="메시지를 입력하거나 마이크 버튼을 누르세요"
+          disabled={busy}
+          rows={1}
+          className="min-h-[44px] resize-none border-white/15 bg-white/5 text-white placeholder:text-white/40"
+        />
+        <Button
+          type="button"
+          variant="outline"
+          size="icon"
+          title="설정"
+          className="h-11 w-11 shrink-0"
+          onClick={() => setSettingsOpen(true)}
+        >
+          <Settings className="h-4 w-4" />
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          size="icon"
+          title="아바타 선택"
+          className="h-11 w-11 shrink-0"
+          onClick={() => setAvatarOpen(true)}
+        >
+          <UserRound className="h-4 w-4" />
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          size="icon"
+          title="제스처"
+          className="h-11 w-11 shrink-0"
+          onClick={() => setGestureOpen(true)}
+        >
+          <Smile className="h-4 w-4" />
+        </Button>
+        <Recorder
+          disabled={busy}
+          onCaptured={(blob) => void send({ audio: blob })}
+        />
+        <Button
+          type="submit"
+          disabled={busy || input.trim().length === 0}
+          size="icon"
+          className="h-11 w-11 shrink-0"
+        >
+          {busy ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <Send className="h-4 w-4" />
+          )}
+        </Button>
+      </div>
+    </form>
   );
 
   return (
@@ -708,321 +996,160 @@ export default function App() {
         <DocViewer ref={docViewerRef} />
       </div>
 
-      {/* Avatar area — the whole viewport normally, the right pane in doc mode.
-          All overlays (bubbles, input, previews, modals) live inside it. */}
-      <div className="relative h-full min-w-0 flex-[2] overflow-hidden bg-[radial-gradient(ellipse_at_center,_hsl(222_47%_13%)_0%,_hsl(222_84%_5%)_70%)]">
-        {/* 3D avatar fills the viewport (mounted once the manifest resolves) */}
-        <div className="absolute inset-0">
-          {avatar && (
-            <Avatar
-              ref={avatarRef}
-              avatarUrl={avatar}
-              getMouthLevel={() => playerRef.current.getLevel()}
-              onStatus={(status, message) => {
-                setAvatarStatus(status);
-                setAvatarError(message ?? null);
-              }}
-            />
-          )}
-        </div>
-
-        {/* Avatar loading / error overlay */}
-        {avatarStatus !== "ready" && (
-          <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-            {avatarStatus === "loading" ? (
-              <div className="flex items-center gap-2 rounded-full bg-black/40 px-4 py-2 text-sm text-white/80 backdrop-blur">
-                <Loader2 className="h-4 w-4 animate-spin" />
-                아바타 불러오는 중…
-              </div>
-            ) : (
-              <div className="max-w-sm rounded-md border border-destructive/40 bg-destructive/15 px-4 py-3 text-center text-sm text-destructive">
-                아바타를 불러오지 못했습니다
-                {avatarError && (
-                  <p className="mt-1 text-xs opacity-80">{avatarError}</p>
-                )}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Chat: a rolling window of message bubbles. Each enters by sliding up
-            from below; the oldest leaves by sliding up and out. */}
-        <div
-          className={`pointer-events-none absolute inset-x-0 ${
-            expanded ? "bottom-24" : "bottom-28"
-          } mx-auto flex max-w-2xl flex-col gap-2 px-4`}
-        >
-          {items.map((b) => (
-            <div
-              key={b.id}
-              className={`flex ${
-                b.role === "user" ? "justify-end" : "justify-start"
-              } duration-300 ${
-                b.leaving
-                  ? "animate-out fade-out-0 slide-out-to-top-4 fill-mode-forwards"
-                  : "animate-in fade-in-0 slide-in-from-bottom-3"
-              }`}
-            >
-              {b.role === "user" ? (
-                <div className="max-w-[80%] rounded-2xl rounded-br-sm border border-white/15 bg-black/40 px-4 py-2 text-sm text-white shadow-lg backdrop-blur">
-                  {(b.docUrl || b.imageUrl) && (
-                    <div className="mb-1.5 flex flex-wrap items-center justify-center gap-1.5">
-                      {b.docUrl && (
-                        <img
-                          src={b.docUrl}
-                          alt="첨부한 문서 화면"
-                          className="block max-h-24 w-auto max-w-full rounded-lg"
-                        />
-                      )}
-                      {b.imageUrl && (
-                        <img
-                          src={b.imageUrl}
-                          alt="첨부한 카메라 이미지"
-                          className="block max-h-24 w-auto max-w-full rounded-lg object-cover"
-                        />
-                      )}
-                    </div>
-                  )}
-                  {b.text.length > 0 && (
-                    <p className="whitespace-pre-wrap break-words">{b.text}</p>
-                  )}
-                </div>
-              ) : (
-                <div className="flex max-w-[80%] flex-col items-start gap-1">
-                  <div className="rounded-2xl rounded-bl-sm border border-white/15 bg-black/40 px-4 py-2 text-sm leading-relaxed text-white shadow-lg backdrop-blur">
-                    {b.text.length > 0 && (
-                      <p className="whitespace-pre-wrap break-words">{b.text}</p>
-                    )}
-                    {b.error && (
-                      <p className="mt-1 text-xs text-destructive">{b.error}</p>
-                    )}
-                  </div>
-                  {speakingId === b.id && (
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => stopSpeaking(b.id)}
-                      title="음성 중지"
-                      aria-label="음성 중지"
-                      className="pointer-events-auto h-8 gap-1.5 rounded-full border border-white/15 bg-black/50 px-3 text-xs text-white shadow-lg backdrop-blur hover:bg-black/70 hover:text-white"
-                    >
-                      <Square className="h-3.5 w-3.5 fill-current" />
-                      중지
-                    </Button>
-                  )}
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
-
-        {toastMsg && (
-          <div
-            className={`pointer-events-none absolute inset-x-0 ${
-              expanded ? "bottom-40" : "bottom-44"
-            } flex justify-center px-4`}
-          >
-            <div className="animate-in fade-in-0 slide-in-from-bottom-2 rounded-full border border-white/15 bg-black/50 px-4 py-2 text-xs text-white/90 shadow-lg backdrop-blur">
-              {toastMsg}
-            </div>
-          </div>
-        )}
-
-        {!audioSupported && (
-          <div
-            className={`pointer-events-none absolute inset-x-0 ${
-              expanded ? "bottom-24" : "bottom-28"
-            } flex justify-center px-4`}
-          >
-            <div className="rounded-md border border-destructive/40 bg-destructive/15 px-3 py-2 text-xs text-destructive">
-              이 브라우저는 Web Audio API를 지원하지 않아 음성 출력이 재생되지
-              않습니다.
-            </div>
-          </div>
-        )}
-
-        {/* Live camera preview, top-right while the camera is on. Front camera is
-            mirrored (selfie), back camera is not. Toggle off with the camera
-            button. Captured frames are always un-mirrored (see captureFrame). */}
-        {cameraOn && (
-          <div className="absolute right-4 top-4 z-[5] flex flex-col items-end gap-2">
-            <div
-              className="overflow-hidden rounded-xl border border-white/20 shadow-lg shadow-black/40"
-              style={{ width: previewW }}
-            >
-              <video
-                ref={cameraVideoRef}
-                autoPlay
-                muted
-                playsInline
-                // Match the box to the real stream ratio (fires again on camera
-                // switch, when a new srcObject is bound) so the preview reflects
-                // exactly what captureFrame() sends — no fixed-16:9 crop.
-                onLoadedMetadata={(e) => {
-                  const v = e.currentTarget;
-                  if (v.videoWidth > 0 && v.videoHeight > 0)
-                    setPreviewAspect(v.videoWidth / v.videoHeight);
+      {/* Chat column — the whole viewport normally, the right pane in doc mode.
+          A column so 분리 모드 can stack [3D | log | input]; in 인라인 모드 the
+          3D area is the only row and everything floats over it. The modals hang
+          off this element, so they cover the column in both modes. */}
+      <div className="relative flex h-full min-w-0 flex-[2] flex-col overflow-hidden">
+        {/* Avatar area — the 3D view and everything that floats over it. */}
+        <div className="relative min-h-0 flex-1 overflow-hidden bg-[radial-gradient(ellipse_at_center,_hsl(222_47%_13%)_0%,_hsl(222_84%_5%)_70%)]">
+          {/* 3D avatar fills the area (mounted once the manifest resolves) */}
+          <div className="absolute inset-0">
+            {avatar && (
+              <Avatar
+                ref={avatarRef}
+                avatarUrl={avatar}
+                cameraDistance={
+                  bubbleMode === "separate" ? SEPARATE_CAMERA_DISTANCE : undefined
+                }
+                getMouthLevel={() => playerRef.current.getLevel()}
+                onStatus={(status, message) => {
+                  setAvatarStatus(status);
+                  setAvatarError(message ?? null);
                 }}
-                style={{ aspectRatio: previewRatio }}
-                className={`w-full object-cover ${
-                  facingMode === "user" ? "-scale-x-100" : ""
-                }`}
               />
+            )}
+          </div>
+
+          {/* Avatar loading / error overlay */}
+          {avatarStatus !== "ready" && (
+            <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+              {avatarStatus === "loading" ? (
+                <div className="flex items-center gap-2 rounded-full bg-black/40 px-4 py-2 text-sm text-white/80 backdrop-blur">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  아바타 불러오는 중…
+                </div>
+              ) : (
+                <div className="max-w-sm rounded-md border border-destructive/40 bg-destructive/15 px-4 py-3 text-center text-sm text-destructive">
+                  아바타를 불러오지 못했습니다
+                  {avatarError && (
+                    <p className="mt-1 text-xs opacity-80">{avatarError}</p>
+                  )}
+                </div>
+              )}
             </div>
-            {/* Front/back switch — only when the device has 2+ cameras (phones). */}
-            {videoInputCount >= 2 && (
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                title="전/후면 카메라 전환"
-                onClick={() => void switchCamera()}
-                className="h-8 gap-1.5 rounded-full border border-white/15 bg-black/50 px-3 text-xs text-white shadow-lg backdrop-blur hover:bg-black/70 hover:text-white"
+          )}
+
+          {/* 인라인 모드: a rolling window of bubbles over the 3D view. Each enters
+              by sliding up from below; the oldest leaves by sliding up and out.
+              분리 모드 renders the same bubbles in the log pane below instead. */}
+          {bubbleMode === "inline" && (
+            <div
+              className={`pointer-events-none absolute inset-x-0 ${
+                expanded ? "bottom-24" : "bottom-28"
+              } mx-auto flex max-w-2xl flex-col gap-2 px-4`}
+            >
+              {inlineBubbles.map(renderBubble)}
+            </div>
+          )}
+
+          {toastMsg && (
+            <div
+              className={`pointer-events-none absolute inset-x-0 ${
+                // 분리 모드 has no input floating over the 3D view to clear.
+                !floatingInput ? "bottom-16" : expanded ? "bottom-40" : "bottom-44"
+              } flex justify-center px-4`}
+            >
+              <div className="animate-in fade-in-0 slide-in-from-bottom-2 rounded-full border border-white/15 bg-black/50 px-4 py-2 text-xs text-white/90 shadow-lg backdrop-blur">
+                {toastMsg}
+              </div>
+            </div>
+          )}
+
+          {!audioSupported && (
+            <div
+              className={`pointer-events-none absolute inset-x-0 ${
+                !floatingInput ? "bottom-4" : expanded ? "bottom-24" : "bottom-28"
+              } flex justify-center px-4`}
+            >
+              <div className="rounded-md border border-destructive/40 bg-destructive/15 px-3 py-2 text-xs text-destructive">
+                이 브라우저는 Web Audio API를 지원하지 않아 음성 출력이 재생되지
+                않습니다.
+              </div>
+            </div>
+          )}
+
+          {/* Live camera preview, top-right while the camera is on. Front camera is
+              mirrored (selfie), back camera is not. Toggle off with the camera
+              button. Captured frames are always un-mirrored (see captureFrame). */}
+          {cameraOn && (
+            <div className="absolute right-4 top-4 z-[5] flex flex-col items-end gap-2">
+              <div
+                className="overflow-hidden rounded-xl border border-white/20 shadow-lg shadow-black/40"
+                style={{ width: previewW }}
               >
-                <SwitchCamera className="h-3.5 w-3.5" />
-                전환
-              </Button>
+                <video
+                  ref={cameraVideoRef}
+                  autoPlay
+                  muted
+                  playsInline
+                  // Match the box to the real stream ratio (fires again on camera
+                  // switch, when a new srcObject is bound) so the preview reflects
+                  // exactly what captureFrame() sends — no fixed-16:9 crop.
+                  onLoadedMetadata={(e) => {
+                    const v = e.currentTarget;
+                    if (v.videoWidth > 0 && v.videoHeight > 0)
+                      setPreviewAspect(v.videoWidth / v.videoHeight);
+                  }}
+                  style={{ aspectRatio: previewRatio }}
+                  className={`w-full object-cover ${
+                    facingMode === "user" ? "-scale-x-100" : ""
+                  }`}
+                />
+              </div>
+              {/* Front/back switch — only when the device has 2+ cameras (phones). */}
+              {videoInputCount >= 2 && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  title="전/후면 카메라 전환"
+                  onClick={() => void switchCamera()}
+                  className="h-8 gap-1.5 rounded-full border border-white/15 bg-black/50 px-3 text-xs text-white shadow-lg backdrop-blur hover:bg-black/70 hover:text-white"
+                >
+                  <SwitchCamera className="h-3.5 w-3.5" />
+                  전환
+                </Button>
+              )}
+            </div>
+          )}
+
+          {/* 인라인 모드: the input floats over the 3D view (분리 모드 puts it
+              under the log, outside this area — see below). */}
+          {floatingInput && inputBar}
+        </div>
+
+        {/* 분리 모드: the session log gets its own scrollable pane under the 3D
+            view, with the input below it. History is whatever this browser
+            session has said — nothing is loaded from the server. */}
+        {!floatingInput && (
+          <div
+            ref={logRef}
+            onScroll={onLogScroll}
+            className="h-[36%] min-h-[132px] shrink-0 overflow-y-auto border-t border-white/10 bg-black/40 px-4 py-3"
+          >
+            {messages.length === 0 ? (
+              <p className="flex h-full items-center justify-center text-xs text-white/30">
+                대화가 여기에 표시됩니다
+              </p>
+            ) : (
+              <div className="mx-auto flex max-w-2xl flex-col gap-2">
+                {messages.map(renderBubble)}
+              </div>
             )}
           </div>
         )}
-
-        {/* Voice-first input. Collapsed: mic + file upload + camera + "..." in a row.
-            "..." reveals the full bar (text input + gesture + send). */}
-        {!expanded ? (
-          <div className="absolute inset-x-0 bottom-6 flex items-center justify-center gap-4">
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".txt,.md,.markdown,text/plain,text/markdown"
-              className="hidden"
-              onChange={(e) => {
-                void onFilePicked(e.target.files?.[0]);
-                e.target.value = "";
-              }}
-            />
-            {/* Order: 문서(doc viewer) - 음성(mic) - 카메라(camera) - 파일(upload) - ...(more). */}
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              title={docMode ? "문서 조회 모드 끄기" : "문서 조회 모드"}
-              className={
-                docMode
-                  ? "h-16 w-16 shrink-0 rounded-full bg-white text-black shadow-lg shadow-black/30 hover:bg-white/90 hover:text-black"
-                  : "h-16 w-16 shrink-0 rounded-full border border-white/15 bg-black/40 text-white shadow-lg shadow-black/30 backdrop-blur hover:bg-black/55 hover:text-white"
-              }
-              onClick={() => setDocMode((v) => !v)}
-            >
-              <BookOpen className="h-6 w-6" />
-            </Button>
-            <Recorder
-              size="lg"
-              disabled={busy}
-              onCaptured={(blob) => void send({ audio: blob })}
-            />
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              title={cameraOn ? "카메라 끄기" : "카메라 켜기"}
-              className={
-                cameraOn
-                  ? "h-16 w-16 shrink-0 rounded-full bg-white text-black shadow-lg shadow-black/30 hover:bg-white/90 hover:text-black"
-                  : "h-16 w-16 shrink-0 rounded-full border border-white/15 bg-black/40 text-white shadow-lg shadow-black/30 backdrop-blur hover:bg-black/55 hover:text-white"
-              }
-              onClick={() => void toggleCamera()}
-            >
-              <Camera className="h-6 w-6" />
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              disabled={uploading}
-              title="문서 업로드"
-              className="h-16 w-16 shrink-0 rounded-full border border-white/15 bg-black/40 text-white shadow-lg shadow-black/30 backdrop-blur hover:bg-black/55 hover:text-white"
-              onClick={() => fileInputRef.current?.click()}
-            >
-              {uploading ? (
-                <Loader2 className="h-6 w-6 animate-spin" />
-              ) : (
-                <FileUp className="h-6 w-6" />
-              )}
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              className="h-12 w-12 shrink-0 rounded-full border border-white/15 bg-black/40 text-white shadow-lg shadow-black/30 backdrop-blur hover:bg-black/55 hover:text-white"
-              onClick={() => setExpanded(true)}
-            >
-              <MoreHorizontal className="h-5 w-5" />
-            </Button>
-          </div>
-        ) : (
-          <form
-            onSubmit={onSubmit}
-            className="absolute inset-x-0 bottom-0 border-t border-white/10 bg-black/30 backdrop-blur"
-          >
-            <div className="mx-auto flex max-w-2xl items-end gap-2 p-3">
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="h-11 w-11 shrink-0 text-white/60 hover:text-white"
-                onClick={() => setExpanded(false)}
-              >
-                <ChevronDown className="h-4 w-4" />
-              </Button>
-              <Textarea
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={onKeyDown}
-                placeholder="메시지를 입력하거나 마이크 버튼을 누르세요"
-                disabled={busy}
-                rows={1}
-                className="min-h-[44px] resize-none border-white/15 bg-white/5 text-white placeholder:text-white/40"
-              />
-              <Button
-                type="button"
-                variant="outline"
-                size="icon"
-                title="아바타 선택"
-                className="h-11 w-11 shrink-0"
-                onClick={() => setAvatarOpen(true)}
-              >
-                <UserRound className="h-4 w-4" />
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                size="icon"
-                title="제스처"
-                className="h-11 w-11 shrink-0"
-                onClick={() => setGestureOpen(true)}
-              >
-                <Smile className="h-4 w-4" />
-              </Button>
-              <Recorder
-                disabled={busy}
-                onCaptured={(blob) => void send({ audio: blob })}
-              />
-              <Button
-                type="submit"
-                disabled={busy || input.trim().length === 0}
-                size="icon"
-                className="h-11 w-11 shrink-0"
-              >
-                {busy ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <Send className="h-4 w-4" />
-                )}
-              </Button>
-            </div>
-          </form>
-        )}
+        {!floatingInput && inputBar}
 
         {/* Avatar picker modal — renders public/avatars.json (lib/avatars.ts) */}
         {avatarOpen && (
@@ -1059,6 +1186,57 @@ export default function App() {
                         <UserRound className="h-5 w-5 shrink-0" />
                       )}
                       <span className="truncate">{avatarLabel(url)}</span>
+                    </Button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Settings modal — local UI preferences (lib/settings.ts) */}
+        {settingsOpen && (
+          <div
+            className="absolute inset-0 z-10 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm"
+            onClick={() => setSettingsOpen(false)}
+          >
+            <div
+              className="relative w-full max-w-xs rounded-2xl border border-white/10 bg-zinc-900/95 p-5 shadow-2xl"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <button
+                type="button"
+                onClick={() => setSettingsOpen(false)}
+                className="absolute right-3 top-3 text-white/50 transition-colors hover:text-white"
+              >
+                <X className="h-5 w-5" />
+              </button>
+              <h2 className="text-base font-semibold text-white">설정</h2>
+              <p className="mb-4 mt-3 text-xs font-medium text-white/50">
+                말풍선 표시
+              </p>
+              <div className="flex flex-col gap-2">
+                {BUBBLE_MODES.map((m) => {
+                  const selected = m.id === bubbleMode;
+                  return (
+                    <Button
+                      key={m.id}
+                      type="button"
+                      variant={selected ? "default" : "secondary"}
+                      className="h-auto flex-col items-start gap-1 px-3 py-2.5 text-sm"
+                      onClick={() => selectBubbleMode(m.id)}
+                    >
+                      <span className="flex items-center gap-2">
+                        {selected ? (
+                          <Check className="h-4 w-4 shrink-0" />
+                        ) : (
+                          <MessageSquare className="h-4 w-4 shrink-0" />
+                        )}
+                        {m.label}
+                      </span>
+                      <span className="whitespace-normal text-left text-xs font-normal opacity-70">
+                        {m.hint}
+                      </span>
                     </Button>
                   );
                 })}
