@@ -1,23 +1,32 @@
 import type { PerceptionCheck } from "./types.ts";
 
 /**
- * Is the user still in front of the camera?
+ * Is the user's FACE still in frame?
  *
- * Polled while the camera is on; the first frame with nobody in it makes the
- * avatar check in on them. It only speaks once per disappearance — the client
- * re-arms the trigger when `present` comes back.
+ * Stricter than "is anybody in frame" — a torso at the edge of the shot with
+ * the head cropped out counts as gone — but no stricter than that: the face
+ * only has to be visible, not looking at the camera. Glancing away, a partly
+ * covered face or a dim frame are all still `present`; nudging the user for
+ * those reads as nagging.
+ *
+ * Polled while the camera is on. It only speaks once per disappearance — the
+ * client keeps the trigger disarmed until the user actually sends a turn (see
+ * `perceptionState` in web/src/App.tsx), so reappearing alone doesn't re-arm it.
  */
 export function createPresenceCheck(): PerceptionCheck {
   return {
     name: "presence",
     intervalMs: 3000,
-    consecutive: 1, // speak up on the first frame with nobody in it
-    // A person is easy to spot at low resolution, and OpenAI bills a "low
+    // Two in a row (~6s): a face-level check flickers on ordinary moments — a
+    // glance down at the keyboard, a turn to a second monitor — and nudging the
+    // user for those reads as nagging. Drop to 1 to speak up on the first frame.
+    consecutive: 2,
+    // A face is still easy to spot at low resolution, and OpenAI bills a "low
     // detail" image at a flat token rate — keep the polling frame small.
     frameMaxPx: 256,
     frameQuality: 0.5,
     prompt:
-      '이 사진에 사람이 일부라도 (얼굴, 몸, 손 등) 보이면 "present", 아무도 없으면 "absent"라고만 답하라. 다른 말은 절대 하지 마라.',
+      '이 사진에 사람의 얼굴이 보이면 "present", 보이지 않으면 "absent"라고만 답하라. 얼굴이 화면에 나오기만 하면 다른 곳을 보고 있든, 옆얼굴이든, 일부가 가려졌든, 어둡든 상관없이 "present"다. 아무도 없거나, 몸이나 손만 나오고 얼굴은 화면 밖으로 벗어났거나, 뒤통수만 보여서 얼굴을 볼 수 없을 때만 "absent"다. 다른 말은 절대 하지 마라.',
     // "present" first: an answer we can't parse must not trigger the avatar.
     labels: ["present", "absent"],
     // The signal is a plain-Korean sensor reading, not a code: a terse token
