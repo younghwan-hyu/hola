@@ -82,12 +82,18 @@ export function createOpenAiProvider(
       image,
       maxTokens,
     }: AiClassifyInput): Promise<string> {
-      // No system prompt, no history, no tools, and no reasoning effort: this is
-      // a polled label lookup, not part of the conversation. `detail: "low"`
-      // bills the image at a flat, small token count.
+      // No system prompt, no history, no tools: this is a polled label lookup,
+      // not part of the conversation. `detail: "low"` bills the image at a
+      // flat, small token count. reasoning_effort must mirror the configured
+      // effort — reasoning models default to a non-trivial effort, spend the
+      // whole tiny max_completion_tokens budget on reasoning and return empty
+      // content, which parses as the inert label so the check never fires.
       const res = await client.chat.completions.create({
         model: cfg.model,
         max_completion_tokens: maxTokens,
+        ...(cfg.openaiReasoning
+          ? { reasoning_effort: cfg.openaiReasoning as never }
+          : {}),
         messages: [
           {
             role: "user",
