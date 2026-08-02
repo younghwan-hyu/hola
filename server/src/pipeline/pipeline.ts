@@ -11,6 +11,8 @@ export interface PipelineDeps {
   aiSession: AiSession;
   tts: TtsProvider;
   sentenceBoundaryChars: string;
+  /** Gestures allowed through to the client (config.gestures, GESTURES env). */
+  enabledGestures: ReadonlySet<string>;
 }
 
 export interface PipelineInput {
@@ -94,8 +96,12 @@ export async function runPipeline(
     const gestureParser = new GestureCommandParser();
     const handleGestures = (names: string[]): void => {
       for (const name of names) {
-        if (KNOWN_GESTURES.has(name)) {
+        if (deps.enabledGestures.has(name)) {
           session.emit({ type: "gesture", name });
+        } else if (KNOWN_GESTURES.has(name)) {
+          // Valid but switched off via GESTURES — the model isn't told about
+          // it, but if it emits one anyway don't let it through to the client.
+          console.warn(`[pipeline] ignoring disabled gesture command: ${name}`);
         } else {
           console.warn(`[pipeline] ignoring unknown gesture command: ${name}`);
         }

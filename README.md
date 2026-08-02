@@ -105,6 +105,7 @@ cd web && npm install && npm run dev
 | TTS 샘플레이트 | `TTS_SAMPLE_RATE_HERTZ` | `24000` |
 | TTS 오디오 포맷 | `TTS_AUDIO_ENCODING` | `PCM` (또는 `OGG_OPUS`) |
 | 문장 분할 기호 | `SENTENCE_BOUNDARY_CHARS` | `.,!?;:\n。，！？；：` |
+| AI 제스처 목록 | `GESTURES` | 미지정 시 전체. 쉼표 구분 부분집합, 빈 값(`GESTURES=`)이면 끔 ([제스처 커맨드](#제스처-커맨드)) |
 | Python 실행 파일 (weather tool) | `PYTHON_BIN` | `python3` |
 | Postgres(pgvector) 접속 | `DATABASE_URL` | `postgres://hola:hola@localhost:5432/hola` |
 | 임베딩 provider | `EMBEDDINGS_PROVIDER` | `ollama` |
@@ -261,7 +262,9 @@ AI는 응답 스트림 안에 `{gesture=NAME}` 형식으로 아바타 제스처�
 | `action_wave` | 손 흔들기 |
 | `show_sunny` | 해 등장 (맑은 날씨) |
 
-> 시스템 프롬프트는 **소스(`server/src/ai/system-prompt.ts`)** 에 정의되어 있고, 모델에게 이 형식과 사용 가능한 이름을 지시합니다(env 변수 아님). 알 수 없는 이름은 서버가 무시합니다.
+> 시스템 프롬프트는 **소스(`server/src/ai/system-prompt.ts`)** 에 정의되어 있고, 모델에게 이 형식과 사용 가능한 이름을 지시합니다. 알 수 없는 이름은 서버가 무시합니다.
+
+**AI가 낼 수 있는 제스처는 `server/.env`의 `GESTURES`로 제한할 수 있습니다** (쉼표 구분, 예: `GESTURES=expression_happy,action_wave`). 미지정 시 전체 활성, 빈 값(`GESTURES=`)이면 AI 제스처 기능 자체가 꺼집니다 (프롬프트에서 제스처 지시가 통째로 빠짐). 이 목록은 시스템 프롬프트의 제스처 목록과 서버의 `gesture` 이벤트 필터에만 적용됩니다 — 위 표의 전체 레지스트리(서버 `KNOWN_GESTURES` / 클라 `gestures.ts`)는 그대로 유지되므로 **웹은 수정할 필요가 없고**, 웹 UI의 수동 제스처 메뉴도 계속 전체가 동작합니다. 모델이 비활성 제스처를 내면 서버가 걸러냅니다.
 
 ## 브라우저 호환성
 

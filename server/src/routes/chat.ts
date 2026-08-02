@@ -23,6 +23,7 @@ const MAX_IMAGE_BYTES = 8 * 1024 * 1024; // 8MB cap on camera frames.
 export function createChatRouter(deps: Deps): Router {
   const router = Router();
   const registry = new SessionRegistry();
+  const enabledGestures: ReadonlySet<string> = new Set(deps.config.gestures);
   const upload = multer({
     storage: multer.memoryStorage(),
     limits: { fileSize: 25 * 1024 * 1024 }, // 25MB cap on uploads.
@@ -92,6 +93,7 @@ export function createChatRouter(deps: Deps): Router {
           aiSession: deps.aiSession,
           tts: deps.tts,
           sentenceBoundaryChars: deps.config.sentenceBoundaryChars,
+          enabledGestures,
         },
       );
     },

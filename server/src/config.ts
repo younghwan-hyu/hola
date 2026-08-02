@@ -1,6 +1,7 @@
 import dotenv from "dotenv";
 
-import { SYSTEM_PROMPT } from "./ai/system-prompt.ts";
+import { buildSystemPrompt } from "./ai/system-prompt.ts";
+import { KNOWN_GESTURES } from "./pipeline/gesture-parser.ts";
 
 dotenv.config();
 
@@ -84,6 +85,12 @@ export interface Config {
   tts: TtsConfig;
   rag: RagConfig;
   sentenceBoundaryChars: string;
+  /**
+   * Gestures the AI may emit (subset of KNOWN_GESTURES). Drives both the
+   * system-prompt gesture list and the pipeline's gesture-event filter. The
+   * web client keeps every gesture implemented regardless.
+   */
+  gestures: string[];
 }
 
 function parseStt(): SttConfig {
@@ -99,7 +106,29 @@ function parseStt(): SttConfig {
   };
 }
 
-function parseAi(): AiConfig {
+/**
+ * Gestures the AI may emit, from the GESTURES env var (comma-separated).
+ * Unset -> every known gesture. Explicitly empty (`GESTURES=`) -> none, which
+ * also drops the gesture instructions from the system prompt. Read directly
+ * from process.env (not optional()) to tell "" apart from unset.
+ */
+function parseGestures(): string[] {
+  const raw = process.env.GESTURES;
+  if (raw === undefined) return [...KNOWN_GESTURES];
+  const names = raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  const unknown = names.filter((n) => !KNOWN_GESTURES.has(n));
+  if (unknown.length > 0) {
+    throw new Error(
+      `Unknown gesture(s) in GESTURES: ${unknown.join(", ")} (valid: ${[...KNOWN_GESTURES].join(", ")})`,
+    );
+  }
+  return [...new Set(names)]; // dedupe, preserve order
+}
+
+function parseAi(gestures: string[]): AiConfig {
   const provider = (optional("AI_PROVIDER") ?? "openai") as AiProviderName;
   if (provider !== "openai" && provider !== "anthropic") {
     throw new Error(`Unsupported AI_PROVIDER: ${provider}`);
@@ -107,7 +136,7 @@ function parseAi(): AiConfig {
   return {
     provider,
     model: required("AI_MODEL"),
-    systemPrompt: SYSTEM_PROMPT,
+    systemPrompt: buildSystemPrompt(gestures),
     openaiReasoning: optional("AI_OPENAI_REASONING"),
     anthropicThinkingBudget: optionalInt("AI_ANTHROPIC_THINKING_BUDGET"),
   };
@@ -162,14 +191,17 @@ function parseRag(): RagConfig {
   };
 }
 
+const gestures = parseGestures();
+
 export const config: Config = {
   port: optionalInt("PORT") ?? 3000,
   openaiKey: required("OPENAI_KEY"),
   anthropicKey: required("ANTHROPIC_KEY"),
   stt: parseStt(),
-  ai: parseAi(),
+  ai: parseAi(gestures),
   tts: parseTts(),
   rag: parseRag(),
   sentenceBoundaryChars:
     optional("SENTENCE_BOUNDARY_CHARS") ?? ".,!?;:\n。，！？；：",
+  gestures,
 };
