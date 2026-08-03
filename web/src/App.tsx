@@ -417,13 +417,25 @@ export default function App() {
     }
   }, [messages, bubbleMode]);
 
-  // Separate mode: follow the newest message, unless the user has scrolled up
-  // to read back through the session.
-  useEffect(() => {
-    if (bubbleMode !== "separate") return;
+  /**
+   * Separate mode: follow the newest message, unless the user has scrolled up
+   * to read back through the session. No-op in inline mode, where the log pane
+   * isn't mounted and the ref is null.
+   *
+   * Also called from the attachment thumbnails' `onLoad`: they carry no
+   * reserved size, so at commit time they measure 0 and the scroll lands short
+   * by their height once the image finally decodes. Reading scrollHeight in the
+   * load handler forces a reflow that already accounts for the image.
+   */
+  const pinLogToBottom = () => {
     const el = logRef.current;
     if (!el || !stickToBottom.current) return;
     el.scrollTop = el.scrollHeight;
+  };
+
+  useEffect(() => {
+    if (bubbleMode !== "separate") return;
+    pinLogToBottom();
   }, [messages, bubbleMode, expanded]);
 
   // Once a turn is done (busy false), hide its stop button when the audio has
@@ -779,6 +791,7 @@ export default function App() {
                   <img
                     src={b.docUrl}
                     alt="첨부한 문서 화면"
+                    onLoad={pinLogToBottom}
                     className="block max-h-24 w-auto max-w-full rounded-lg"
                   />
                 )}
@@ -786,6 +799,7 @@ export default function App() {
                   <img
                     src={b.imageUrl}
                     alt="첨부한 카메라 이미지"
+                    onLoad={pinLogToBottom}
                     className="block max-h-24 w-auto max-w-full rounded-lg object-cover"
                   />
                 )}
