@@ -25,8 +25,15 @@ export function createPerceptionChecks(): PerceptionCheck[] {
   return [createPresenceCheck(), createAttentionCheck()];
 }
 
-/** Explains the `(perception: ...)` signals before the per-check rules. */
-const PERCEPTION_PREAMBLE = `대화 도중 \`(perception: ...)\` 로 시작하는 메시지가 올 수 있다. 이것은 사용자가 한 말이 아니라 카메라·센서가 감지한 상태 알림이다. 괄호 안 문장을 그대로 읽거나 언급하지 말고, 알림 자체에 대해 되묻지도 말고, 아래 규칙에 따라 사용자에게 건네는 자연스러운 말 한마디로만 반응하라.`;
+/**
+ * Explains the `(perception: ...)` signals before the per-check rules.
+ *
+ * The trailing sentences cover the turn AFTER a nudge — the user answering
+ * "어디 가셨어요?" is a throwaway exchange, not a topic, so the avatar
+ * acknowledges it and gets out of the way. Cross-cutting, so it lives here
+ * rather than in any one check's guidance.
+ */
+const PERCEPTION_PREAMBLE = `대화 도중 \`(perception: ...)\` 로 시작하는 메시지가 올 수 있다. 이것은 사용자가 한 말이 아니라 카메라·센서가 감지한 상태 알림이다. 괄호 안 문장을 그대로 읽거나 언급하지 말고, 알림 자체에 대해 되묻지도 말고, 아래 규칙에 따라 사용자에게 건네는 자연스러운 말 한마디로만 반응하라. 그렇게 말을 건 뒤 사용자가 대답하면, 사용자가 말한 내용을 짚어서 알겠다는 짧은 한 문장으로만 반응하고 끝내라. 캐묻거나 훈수 두지 말고, 도와줄까 묻거나 하던 얘기를 다시 꺼내는 등 뒤에 다른 말을 덧붙이지 마라. 다만 대답에 질문이나 다른 용건이 섞여 있으면 그 부분은 평소대로 답하라.`;
 
 /**
  * The system prompt plus every registered check's guidance.
