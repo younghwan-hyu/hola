@@ -58,8 +58,17 @@ export interface AiProvider {
    * Yields text deltas as they arrive from the model. Appends both the user
    * turn and the assistant reply to `session` so context carries over to the
    * next call.
+   *
+   * `signal` cancels the in-flight provider call when the client goes away
+   * (stop button, closed tab). An interrupted turn still commits what the model
+   * managed to say — the user heard it, so the next turn has to know it was
+   * said — but drops any half-finished tool round-trip.
    */
-  stream(input: AiInput, session: AiSession): AsyncIterable<string>;
+  stream(
+    input: AiInput,
+    session: AiSession,
+    signal?: AbortSignal,
+  ): AsyncIterable<string>;
   /**
    * Answer a single question about an image and return the raw text, trimmed.
    *

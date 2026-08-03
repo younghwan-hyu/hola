@@ -178,6 +178,12 @@ export default function App() {
   // aiId of a turn whose voice the user stopped, so late-arriving tts_chunks
   // don't reappend audio or resurrect its stop button.
   const stoppedTurnRef = useRef<string | null>(null);
+  /**
+   * Closes the current turn's SSE stream. Held so the stop button can hang up
+   * on the server mid-turn (the server reads the disconnect as "abort this
+   * turn"); null whenever no turn is streaming.
+   */
+  const closeSseRef = useRef<(() => void) | null>(null);
   const avatarRef = useRef<AvatarHandle>(null);
   const docViewerRef = useRef<DocViewerHandle>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -452,10 +458,29 @@ export default function App() {
     return () => window.clearInterval(id);
   }, [speakingId, busy]);
 
+  /**
+   * Release the turn lock together with the UI's busy flag — they must never
+   * drift apart, or the next send() is refused forever.
+   */
+  const endTurn = () => {
+    turnInFlight.current = false;
+    setBusy(false);
+    closeSseRef.current = null;
+  };
+
+  /**
+   * Stop button: cut the voice AND the turn behind it. Closing the SSE stream
+   * is what tells the server to abort — it stops the model mid-answer and drops
+   * the sentences still queued for TTS instead of finishing them into a socket
+   * nobody reads. Ending the turn here also releases `turnInFlight` right away,
+   * so perception resumes polling instead of waiting out the server.
+   */
   const stopSpeaking = (id: string) => {
     playerRef.current.stop();
     stoppedTurnRef.current = id;
     setSpeakingId(null);
+    closeSseRef.current?.();
+    endTurn();
   };
 
   const send = async (payload: {
@@ -483,12 +508,6 @@ export default function App() {
     const userId = `${turnId}:u`;
     const aiId = `${turnId}:a`;
     const player = playerRef.current;
-    // Release the turn lock together with the UI's busy flag — they must never
-    // drift apart, or the next send() is refused forever.
-    const endTurn = () => {
-      turnInFlight.current = false;
-      setBusy(false);
-    };
 
     // Camera on: capture a fresh frame first so the user bubble can show it as a
     // thumbnail. A failed capture must not block the message.
@@ -580,7 +599,9 @@ export default function App() {
         }
       };
 
-      subscribeChat(
+      // Keep the closer: the stop button uses it to hang up mid-turn, which is
+      // how the server learns to abort. endTurn() clears it.
+      closeSseRef.current = subscribeChat(
         handle.sessionId,
         (ev: ChatEvent) => {
           switch (ev.type) {

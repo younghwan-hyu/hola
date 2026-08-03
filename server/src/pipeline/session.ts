@@ -31,13 +31,21 @@ export class Session {
   private readonly events: ChatEvent[] = [];
   private subscriber: Subscriber | undefined;
   private closed = false;
+  /**
+   * Aborted when the client goes away mid-turn. Handed to the AI provider so
+   * the in-flight request is actually torn down — without it the model keeps
+   * generating (and billing) into a socket nobody is reading.
+   */
+  private readonly ac = new AbortController();
 
   constructor() {
     this.id = randomUUID();
   }
 
   emit(event: ChatEvent): void {
-    if (this.closed && this.subscriber === undefined) return;
+    // Nothing to do once the turn is over: a live subscriber has already been
+    // ended, and buffering for a subscriber that will never arrive just leaks.
+    if (this.closed) return;
     if (this.subscriber) {
       this.subscriber.target.write(event.type, event);
     } else {
@@ -50,6 +58,9 @@ export class Session {
       throw new Error(`session ${this.id} already subscribed`);
     }
     this.subscriber = { target };
+    // The browser hanging up mid-turn (stop button, closed tab, dropped
+    // connection) means nobody is listening — stop the work behind it.
+    target.onDisconnect(() => this.abort());
     for (const ev of this.events) {
       target.write(ev.type, ev);
     }
@@ -67,8 +78,25 @@ export class Session {
     }
   }
 
+  /** The client left: cancel in-flight provider calls, then close. */
+  abort(): void {
+    if (this.closed) return;
+    console.log(`[hola] session ${this.id} aborted by client`);
+    this.ac.abort();
+    this.close();
+  }
+
   get isClosed(): boolean {
     return this.closed;
+  }
+
+  /** True once {@link abort} ran — distinguishes "client left" from "finished". */
+  get aborted(): boolean {
+    return this.ac.signal.aborted;
+  }
+
+  get signal(): AbortSignal {
+    return this.ac.signal;
   }
 }
 

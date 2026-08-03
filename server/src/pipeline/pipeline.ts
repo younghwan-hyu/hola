@@ -132,7 +132,13 @@ export async function runPipeline(
     for await (const delta of deps.ai.stream(
       { prompt: userText, image: input.image, document: input.document },
       deps.aiSession,
+      session.signal,
     )) {
+      // The client left mid-answer (stop button, closed tab). Breaking here
+      // closes the provider's stream too; `signal` normally gets there first,
+      // so this is the backstop for a provider that ignores it. Queued TTS
+      // sentences drop out on their own — the chain checks isClosed.
+      if (session.aborted) break;
       if (!aiTtftReported) {
         aiTtftReported = true;
         session.emit({
@@ -166,8 +172,13 @@ export async function runPipeline(
     }
     session.emit({ type: "done" });
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    session.emit({ type: "error", message });
+    // An abort can surface here as the provider's cancellation error (Anthropic
+    // throws it; OpenAI just ends the stream). That's the client leaving, not a
+    // failure: nobody is left to report it to, and abort() already logged it.
+    if (!session.aborted) {
+      const message = err instanceof Error ? err.message : String(err);
+      session.emit({ type: "error", message });
+    }
   } finally {
     session.close();
   }

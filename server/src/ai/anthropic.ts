@@ -149,9 +149,13 @@ export function createAnthropicProvider(
     async *stream(
       { prompt, image, document }: AiInput,
       session: AiSession,
+      signal?: AbortSignal,
     ): AsyncIterable<string> {
       // `session` is always one this provider issued via createSession().
       const s = session as AnthropicSession;
+      // Identity of the history this turn started from, so an interrupted turn
+      // can tell whether a later turn already committed over it (see below).
+      const historyAtStart = s.history;
       // Evict stale images from a COPY of history (committed only on success).
       const history = pruneAnthropicImages(
         s.history,
@@ -181,62 +185,97 @@ export function createAnthropicProvider(
           : { role: "user", content: prompt };
       const messages: Anthropic.MessageParam[] = [...history, userMessage];
 
-      // Agentic loop: stream text, and whenever the model stops on tool_use,
-      // run the tools, append the results, and continue until it answers.
-      for (let step = 0; step < MAX_TOOL_STEPS; step++) {
-        const stream = client.messages.stream({
-          model: cfg.model,
-          max_tokens: 8192,
-          system: cfg.systemPrompt,
-          messages,
-          ...(toolDefs ? { tools: toolDefs } : {}),
-          ...(cfg.anthropicThinkingBudget
-            ? {
-                thinking: {
-                  type: "enabled",
-                  budget_tokens: cfg.anthropicThinkingBudget,
-                },
+      // Everything the model said this turn, across tool steps. Tracked outside
+      // the loop so an interrupted turn can still be committed (see finally).
+      let spoken = "";
+      let committed = false;
+      try {
+        // Agentic loop: stream text, and whenever the model stops on tool_use,
+        // run the tools, append the results, and continue until it answers.
+        for (let step = 0; step < MAX_TOOL_STEPS; step++) {
+          const stream = client.messages.stream(
+            {
+              model: cfg.model,
+              max_tokens: 8192,
+              system: cfg.systemPrompt,
+              messages,
+              ...(toolDefs ? { tools: toolDefs } : {}),
+              ...(cfg.anthropicThinkingBudget
+                ? {
+                    thinking: {
+                      type: "enabled",
+                      budget_tokens: cfg.anthropicThinkingBudget,
+                    },
+                  }
+                : {}),
+            },
+            { signal },
+          );
+
+          for await (const event of stream) {
+            if (
+              event.type === "content_block_delta" &&
+              event.delta.type === "text_delta"
+            ) {
+              const delta = event.delta.text;
+              if (delta.length > 0) {
+                spoken += delta;
+                yield delta;
               }
-            : {}),
-        });
-
-        for await (const event of stream) {
-          if (
-            event.type === "content_block_delta" &&
-            event.delta.type === "text_delta"
-          ) {
-            const delta = event.delta.text;
-            if (delta.length > 0) yield delta;
+            }
           }
-        }
 
-        const final = await stream.finalMessage();
-        if (final.stop_reason !== "tool_use") {
-          // Final answer: record the assistant turn so the session remembers it.
+          const final = await stream.finalMessage();
+          if (final.stop_reason !== "tool_use") {
+            // Final answer: record the assistant turn so the session remembers it.
+            messages.push({ role: "assistant", content: final.content });
+            break;
+          }
+
+          // Echo the assistant turn back verbatim (preserves any thinking
+          // blocks), then answer every tool_use block with a tool_result.
           messages.push({ role: "assistant", content: final.content });
-          break;
+
+          const toolResults: Anthropic.ToolResultBlockParam[] = [];
+          for (const block of final.content) {
+            if (block.type !== "tool_use") continue;
+            const result = await callTool(toolMap, block.name, block.input);
+            toolResults.push({
+              type: "tool_result",
+              tool_use_id: block.id,
+              content: result,
+            });
+          }
+          messages.push({ role: "user", content: toolResults });
         }
 
-        // Echo the assistant turn back verbatim (preserves any thinking blocks),
-        // then answer every tool_use block with a tool_result.
-        messages.push({ role: "assistant", content: final.content });
-
-        const toolResults: Anthropic.ToolResultBlockParam[] = [];
-        for (const block of final.content) {
-          if (block.type !== "tool_use") continue;
-          const result = await callTool(toolMap, block.name, block.input);
-          toolResults.push({
-            type: "tool_result",
-            tool_use_id: block.id,
-            content: result,
-          });
+        // Persist the full conversation so the next call continues it. (System
+        // is a top-level param on Anthropic, so it never lives in `messages`.)
+        //
+        // Interrupted before the model said anything: not a turn at all, and
+        // committing it would leave two user messages in a row, which the API
+        // rejects on the next call.
+        const interruptedSilently = (signal?.aborted ?? false) && !spoken;
+        if (!interruptedSilently) {
+          s.history = messages;
+          committed = true;
         }
-        messages.push({ role: "user", content: toolResults });
+      } finally {
+        // Interrupted (client hung up) or failed mid-stream. Commit "user asked
+        // X, avatar said Y" so the next turn isn't missing an exchange the user
+        // actually heard. The unfinished step's tool plumbing is dropped: it
+        // only mattered to the answer that never arrived, and leaving it out
+        // keeps the roles alternating. Nothing said -> commit nothing, or
+        // history would end on a user message with no reply.
+        const partial = spoken.trimEnd();
+        if (!committed && partial.length > 0 && s.history === historyAtStart) {
+          s.history = [
+            ...history,
+            userMessage,
+            { role: "assistant", content: partial },
+          ];
+        }
       }
-
-      // Persist the full conversation so the next call continues it. (System is
-      // a top-level param on Anthropic, so it never lives in `messages`.)
-      s.history = messages;
     },
   };
 }

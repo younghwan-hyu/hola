@@ -136,9 +136,13 @@ export function createOpenAiProvider(
     async *stream(
       { prompt, image, document }: AiInput,
       session: AiSession,
+      signal?: AbortSignal,
     ): AsyncIterable<string> {
       // `session` is always one this provider issued via createSession().
       const s = session as OpenAiSession;
+      // Identity of the history this turn started from, so an interrupted turn
+      // can tell whether a later turn already committed over it (see below).
+      const historyAtStart = s.history;
       // Evict stale images from a COPY of history (committed only on success).
       const history = pruneOpenAiImages(
         s.history,
@@ -171,83 +175,119 @@ export function createOpenAiProvider(
         userMessage,
       ];
 
-      // Agentic loop: stream text, and whenever the model emits tool calls,
-      // run them, append the results, and continue until it answers in text.
-      for (let step = 0; step < MAX_TOOL_STEPS; step++) {
-        const stream = await client.chat.completions.create({
-          model: cfg.model,
-          stream: true,
-          messages,
-          ...(toolDefs ? { tools: toolDefs } : {}),
-          ...(cfg.openaiReasoning
-            ? { reasoning_effort: cfg.openaiReasoning as never }
-            : {}),
-        });
+      // Everything the model said this turn, across tool steps. Tracked outside
+      // the loop so an interrupted turn can still be committed (see finally).
+      let spoken = "";
+      let committed = false;
+      try {
+        // Agentic loop: stream text, and whenever the model emits tool calls,
+        // run them, append the results, and continue until it answers in text.
+        for (let step = 0; step < MAX_TOOL_STEPS; step++) {
+          const stream = await client.chat.completions.create(
+            {
+              model: cfg.model,
+              stream: true,
+              messages,
+              ...(toolDefs ? { tools: toolDefs } : {}),
+              ...(cfg.openaiReasoning
+                ? { reasoning_effort: cfg.openaiReasoning as never }
+                : {}),
+            },
+            { signal },
+          );
 
-        let content = "";
-        const calls: { id: string; name: string; args: string }[] = [];
-        let finishReason: string | null = null;
+          let content = "";
+          const calls: { id: string; name: string; args: string }[] = [];
+          let finishReason: string | null = null;
 
-        for await (const chunk of stream) {
-          const choice = chunk.choices[0];
-          if (!choice) continue;
-          const delta = choice.delta;
-          if (typeof delta?.content === "string" && delta.content.length > 0) {
-            content += delta.content;
-            yield delta.content;
+          for await (const chunk of stream) {
+            const choice = chunk.choices[0];
+            if (!choice) continue;
+            const delta = choice.delta;
+            if (typeof delta?.content === "string" && delta.content.length > 0) {
+              content += delta.content;
+              spoken += delta.content;
+              yield delta.content;
+            }
+            for (const tc of delta?.tool_calls ?? []) {
+              const slot = (calls[tc.index] ??= { id: "", name: "", args: "" });
+              if (tc.id) slot.id = tc.id;
+              if (tc.function?.name) slot.name += tc.function.name;
+              if (tc.function?.arguments) slot.args += tc.function.arguments;
+            }
+            if (choice.finish_reason) finishReason = choice.finish_reason;
           }
-          for (const tc of delta?.tool_calls ?? []) {
-            const slot = (calls[tc.index] ??= { id: "", name: "", args: "" });
-            if (tc.id) slot.id = tc.id;
-            if (tc.function?.name) slot.name += tc.function.name;
-            if (tc.function?.arguments) slot.args += tc.function.arguments;
+
+          const toolCalls = calls.filter((c) => c && c.id && c.name);
+          if (finishReason !== "tool_calls" || toolCalls.length === 0) {
+            // Final answer: record the assistant turn so the session remembers it.
+            if (content.length > 0)
+              messages.push({ role: "assistant", content });
+            break;
           }
-          if (choice.finish_reason) finishReason = choice.finish_reason;
-        }
 
-        const toolCalls = calls.filter((c) => c && c.id && c.name);
-        if (finishReason !== "tool_calls" || toolCalls.length === 0) {
-          // Final answer: record the assistant turn so the session remembers it.
-          if (content.length > 0) messages.push({ role: "assistant", content });
-          break;
-        }
+          // Record the assistant turn that requested the tools...
+          messages.push({
+            role: "assistant",
+            content: content.length > 0 ? content : null,
+            tool_calls: toolCalls.map((c) => ({
+              id: c.id,
+              type: "function",
+              function: { name: c.name, arguments: c.args || "{}" },
+            })),
+          });
 
-        // Record the assistant turn that requested the tools...
-        messages.push({
-          role: "assistant",
-          content: content.length > 0 ? content : null,
-          tool_calls: toolCalls.map((c) => ({
-            id: c.id,
-            type: "function",
-            function: { name: c.name, arguments: c.args || "{}" },
-          })),
-        });
-
-        // ...then run each tool and feed its result back.
-        for (const call of toolCalls) {
-          let input: unknown = {};
-          try {
-            input = call.args ? JSON.parse(call.args) : {};
-          } catch {
+          // ...then run each tool and feed its result back.
+          for (const call of toolCalls) {
+            let input: unknown = {};
+            try {
+              input = call.args ? JSON.parse(call.args) : {};
+            } catch {
+              messages.push({
+                role: "tool",
+                tool_call_id: call.id,
+                content: `error: invalid JSON arguments: ${call.args}`,
+              });
+              continue;
+            }
+            const result = await callTool(toolMap, call.name, input);
             messages.push({
               role: "tool",
               tool_call_id: call.id,
-              content: `error: invalid JSON arguments: ${call.args}`,
+              content: result,
             });
-            continue;
           }
-          const result = await callTool(toolMap, call.name, input);
-          messages.push({
-            role: "tool",
-            tool_call_id: call.id,
-            content: result,
-          });
+        }
+
+        // Persist the turn (everything after the system message) so the next
+        // call continues the conversation. System is re-prepended each call.
+        //
+        // An aborted request ends the SDK's stream silently instead of throwing
+        // ("if the user aborts, exit without throwing"), so an interrupted turn
+        // arrives here rather than in the finally below. Cut off before the
+        // model said anything, it isn't a turn at all: committing it would
+        // leave history ending on a question that was never answered.
+        const interruptedSilently = (signal?.aborted ?? false) && !spoken;
+        if (!interruptedSilently) {
+          s.history = messages.slice(1);
+          committed = true;
+        }
+      } finally {
+        // Interrupted (client hung up) or failed mid-stream. Commit "user asked
+        // X, avatar said Y" so the next turn isn't missing an exchange the user
+        // actually heard. The unfinished step's tool plumbing is dropped: it
+        // only mattered to the answer that never arrived, and leaving it out
+        // keeps the roles alternating. Nothing said -> commit nothing, or
+        // history would end on a user message with no reply.
+        const partial = spoken.trimEnd();
+        if (!committed && partial.length > 0 && s.history === historyAtStart) {
+          s.history = [
+            ...history,
+            userMessage,
+            { role: "assistant", content: partial },
+          ];
         }
       }
-
-      // Persist the turn (everything after the system message) so the next call
-      // continues the same conversation. System is re-prepended on each call.
-      s.history = messages.slice(1);
     },
   };
 }
