@@ -239,11 +239,12 @@ export default function App() {
     new Map<string, { label: string; count: number }>(),
   );
   /**
-   * Serializes ticks across checks: at most one classify call in flight, so two
-   * checks can neither race each other into a verdict nor bill two vision calls
-   * at the same instant.
+   * Checks with a capture+classify request currently in flight. Checks run
+   * independently of each other — their requests may overlap — but a check
+   * never has two of its own outstanding: a tick that finds its previous
+   * request still pending is skipped (the frame would be near-identical).
    */
-  const perceptionTicking = useRef(false);
+  const perceptionInFlight = useRef(new Set<string>());
   /**
    * Mirror of `perceptionDisabled` for the polling tick: a check switched off
    * while its verdict is still in flight must not nudge when it lands.
@@ -740,7 +741,7 @@ export default function App() {
   };
 
   // One tick of one perception check. Kept in a ref and reassigned every render
-  // so the timer below always calls the current closure (fresh `send`) without
+  // so the timers below always call the current closure (fresh `send`) without
   // being torn down and restarted.
   const perceptionTickRef = useRef<
     ((check: PerceptionCheckInfo) => Promise<void>) | null
@@ -753,9 +754,10 @@ export default function App() {
     // verdict nothing may act on.
     if (turnInFlight.current || document.hidden || !perceptionArmed.current)
       return;
-    // One check at a time, whichever check that is (see perceptionTicking).
-    if (perceptionTicking.current) return;
-    perceptionTicking.current = true;
+    // This check's previous request is still pending — skip this tick. Other
+    // checks are unaffected: each polls on its own timer.
+    if (perceptionInFlight.current.has(check.name)) return;
+    perceptionInFlight.current.add(check.name);
     try {
       // Every check today is camera-fed (activeChecks only holds checks whose
       // requirements are met, so the camera is on here): capture at its spec.
@@ -781,14 +783,15 @@ export default function App() {
       const count = prev?.label === verdict.label ? prev.count + 1 : 1;
       perceptionState.current.set(check.name, { label: verdict.label, count });
       if (verdict.signal && count >= check.trigger.consecutive) {
-        // Disarm synchronously, before send() yields: from here on every other
-        // check bails at the guard above, so only this one nudge goes out.
+        // Disarm synchronously, before send() yields. Other checks may still
+        // have requests in flight, but each verdict lands in its own event-loop
+        // task and hits the re-check above, so only this one nudge goes out.
         perceptionArmed.current = false;
         setNudgeOut(true);
         void send({ text: verdict.signal, hidden: true });
       }
     } finally {
-      perceptionTicking.current = false;
+      perceptionInFlight.current.delete(check.name);
     }
   };
 
@@ -809,9 +812,14 @@ export default function App() {
     };
   }, [cameraOn]);
 
-  // Drive each check that is switched on and has its requirements met, on its
-  // own interval. The checks are independent here, but they share one arm, so
-  // together they still nudge at most once (see perceptionArmed / the tick).
+  // Poll each active check on its own timer. Checks are independent: their
+  // requests may overlap in flight (the server and the model handle them in
+  // parallel) and verdicts are handled in whatever order they come back, each
+  // in its own event-loop task. Serialising or deferring them isn't needed —
+  // the one thing that must not happen twice, the nudge, is guarded by the
+  // shared arm, which whichever verdict fires first disarms synchronously. The
+  // only tick ever skipped is one whose own previous request is still pending
+  // (see perceptionInFlight), so a slow check can't hold up a fast one.
   useEffect(() => {
     if (activeChecks.length === 0) return;
     const timers = activeChecks.map((check) =>

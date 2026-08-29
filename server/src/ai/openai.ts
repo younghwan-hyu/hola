@@ -21,6 +21,13 @@ interface OpenAiSession extends AiSession {
 /** Placeholder swapped in for an evicted (stale) capture image in history. */
 const IMG_PLACEHOLDER = "[이전 캡처 — 생략됨]";
 
+/**
+ * Request options for `classify`: the browser polls it and gives up after ~8s,
+ * so a slow call is just a missed tick — don't let the SDK's default (minutes
+ * of timeout plus retries) keep working on a verdict nobody will read.
+ */
+const CLASSIFY_REQUEST_OPTIONS = { timeout: 15_000, maxRetries: 0 } as const;
+
 /** data-URL image part for a captured frame (camera or doc-viewer page). */
 function toImagePart(img: {
   bytes: Buffer;
@@ -130,7 +137,7 @@ export function createOpenAiProvider(
             ],
           },
         ],
-      });
+      }, CLASSIFY_REQUEST_OPTIONS);
       return res.choices[0]?.message?.content?.trim() ?? "";
     },
     async *stream(

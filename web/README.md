@@ -39,8 +39,10 @@ TTS PCM 청크 ──appendPcm──▶ StreamingPcmPlayer
 - **입력**: 하단 바의 텍스트 입력(Enter 전송, Shift+Enter 줄바꿈, 한글 IME 대응)과
   마이크 녹음(`src/components/Recorder.tsx`).
 - **판정 폴링**: 카메라가 켜져 있는 동안 `App.tsx`의 폴링 루프(`perceptionTickRef` +
-  체크별 `setInterval`)가 서버에서 받아온 체크 목록을 각자의 주기로 돌립니다(체크 목록
-  조회와 판정 API 호출은 `src/lib/perception.ts`). 저해상도 프레임을 보내고 `signal`이 실려오면
+  체크별 `setInterval`)가 서버에서 받아온 체크들을 각자의 주기로 독립적으로 돌립니다 —
+  요청은 겹쳐도 되고 결과는 도착 순서대로 처리되며, 같은 체크의 직전 요청이 진행 중이면
+  그 틱만 건너뜁니다(체크 목록 조회와 판정 API 호출은 `src/lib/perception.ts`, 요청
+  타임아웃 8초). 저해상도 프레임을 보내고 `signal`이 실려오면
   그 문장을 `hidden` 턴으로 대화 파이프라인에 넣어 아바타가 **먼저 말을 겁니다**
   (사용자 말풍선은 표시되지 않음). 하단 행의 **상황 인지 버튼** 모달에서 체크별로
   켜고 끌 수 있습니다. 체크는 켜져 있고 서버가 선언한 `requires`(현재 `"camera"`)가 모두

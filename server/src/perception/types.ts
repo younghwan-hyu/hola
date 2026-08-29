@@ -13,7 +13,11 @@ export type PerceptionRequirement = "camera";
  */
 export interface PerceptionTrigger {
   kind: "poll";
-  /** How often the client samples while the check is able to run. */
+  /**
+   * How often the client samples while the check is able to run. Checks poll
+   * independently of each other (their requests may overlap); the client only
+   * skips a tick whose previous request for the SAME check is still pending.
+   */
   intervalMs: number;
   /**
    * How many consecutive triggering verdicts before acting. 1 fires on the

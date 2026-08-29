@@ -17,6 +17,7 @@
  */
 export interface PerceptionTrigger {
   kind: "poll";
+  /** How often to sample while the check can run (a tick is skipped only if this check's previous request is still pending). */
   intervalMs: number;
   /** Consecutive triggering verdicts required before acting (1 = immediately). */
   consecutive: number;
@@ -105,6 +106,14 @@ export async function fetchPerceptionChecks(): Promise<PerceptionCheckInfo[]> {
   }
 }
 
+/**
+ * Cap on one classify round-trip. A check skips its ticks while its previous
+ * request is still pending, so without this a single hung request would freeze
+ * that check for as long as the server's own (minutes-long) timeout. A classify
+ * normally answers in 1–3s; past this it's just a missed tick.
+ */
+const PERCEPTION_TIMEOUT_MS = 8000;
+
 /** Run one check against a frame. null when the tick produced no verdict. */
 export async function runPerceptionCheck(
   name: string,
@@ -116,6 +125,7 @@ export async function runPerceptionCheck(
     const res = await fetch(`/api/perception/${encodeURIComponent(name)}`, {
       method: "POST",
       body: fd,
+      signal: AbortSignal.timeout(PERCEPTION_TIMEOUT_MS),
     });
     if (!res.ok) return null;
     const json: unknown = await res.json();
