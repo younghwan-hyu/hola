@@ -4,7 +4,10 @@ export interface TtsInput {
 
 export interface TtsProvider {
   readonly name: string;
-  /** Yields OGG_OPUS audio chunks as they arrive. */
+  /**
+   * Yields audio chunks as they arrive, encoded per the configured
+   * `audioEncoding` (PCM int16 LE at `sampleRateHertz` by default, or OGG_OPUS).
+   */
   stream(input: TtsInput): AsyncIterable<Uint8Array>;
   /** Pre-warm TLS / auth / connection so the first user request isn't cold. */
   warmup(): Promise<void>;

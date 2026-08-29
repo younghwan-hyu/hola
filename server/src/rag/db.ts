@@ -67,8 +67,10 @@ async function writeMeta(
  * - dimension changed, store empty  -> drop & recreate the chunks table at the
  *   new dimension (safe, no data lost), and record the new model/dim.
  * - dimension changed, store has data -> refuse: log loudly and leave the schema
- *   and meta untouched (uploads will keep working against the OLD dim until the
- *   operator reverts the config or wipes the `pgdata` volume).
+ *   and meta untouched. Uploads AND search fail until the operator reverts
+ *   EMBEDDING_DIM or wipes the `pgdata` volume: the embeddings provider rejects
+ *   vectors that don't match the configured dim, and a vector that does match
+ *   it can't be inserted into (or compared against) the old-dim column.
  * - model changed (same dim), store has data -> log loudly; existing vectors are
  *   from the old model and won't match new queries. Re-upload or wipe.
  */

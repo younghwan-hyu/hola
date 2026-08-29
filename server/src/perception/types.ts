@@ -40,9 +40,11 @@ export interface PerceptionCheck extends PerceptionCheckInfo {
   labels: readonly string[];
   /**
    * Labels that should make the avatar say something, mapped to the SIGNAL
-   * injected into the chat pipeline — a short `(perception:name=label)` token,
-   * not an instruction. How to react to it belongs in {@link guidance}: orders
-   * smuggled into a user turn get ignored by the model.
+   * injected into the chat pipeline — a plain-language status line such as
+   * `(perception: 사용자가 카메라 화면에서 사라졌습니다)`, not an instruction
+   * (and not a terse code like `presence=absent`, which the model answers with
+   * "무슨 뜻인지 모르겠습니다"). How to react to it belongs in {@link guidance}:
+   * orders smuggled into a user turn get ignored by the model.
    */
   triggers: Readonly<Record<string, string>>;
   /**

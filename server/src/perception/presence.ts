@@ -11,7 +11,7 @@ import type { PerceptionCheck } from "./types.ts";
  *
  * Polled while the camera is on. It only speaks once per disappearance — the
  * client keeps the trigger disarmed until the user actually sends a turn (see
- * `perceptionState` in web/src/App.tsx), so reappearing alone doesn't re-arm it.
+ * `perceptionArmed` in web/src/App.tsx), so reappearing alone doesn't re-arm it.
  */
 export function createPresenceCheck(): PerceptionCheck {
   return {

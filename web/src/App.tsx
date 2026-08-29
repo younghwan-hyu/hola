@@ -119,8 +119,9 @@ export default function App() {
   // "loading" -> "ready" on its own.
   const [avatar, setAvatar] = useState<string | null>(null);
   const [avatarOpen, setAvatarOpen] = useState(false);
-  // Input is voice-first: collapsed shows a row of mic + file + camera + "...";
-  // expanding reveals the full bar (text input + gesture + send).
+  // Input is voice-first: collapsed shows a row of doc viewer + mic + camera +
+  // file upload + "..."; expanding reveals the full bar (text input + settings +
+  // avatar + gesture + mic + send).
   const [expanded, setExpanded] = useState(false);
   // Document upload (RAG) is independent of the chat `busy` state.
   const [uploading, setUploading] = useState(false);
@@ -860,10 +861,11 @@ export default function App() {
     );
   };
 
-  // Voice-first input. Collapsed: mic + file upload + camera + "..." in a row;
-  // "..." reveals the full bar (text input + gesture + send). It floats over the
-  // 3D view in inline mode and sits under the log as a normal row in separate
-  // mode, so only the positioning classes differ.
+  // Voice-first input. Collapsed: doc viewer + mic + camera + file upload + "..."
+  // in a row; "..." reveals the full bar (text input + settings + avatar +
+  // gesture + mic + send). It floats over the 3D view in inline mode and sits
+  // under the log as a normal row in separate mode, so only the positioning
+  // classes differ.
   const floatingInput = bubbleMode === "inline";
   const inputBar = !expanded ? (
     <div

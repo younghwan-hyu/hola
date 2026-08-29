@@ -3,7 +3,7 @@
  *
  * The browser doesn't know what any individual check means: it fetches the list
  * from the server, polls each one on its own interval while the camera is on,
- * and if a verdict comes back carrying a `signal`, hands that token to the
+ * and if a verdict comes back carrying a `signal`, hands that text to the
  * normal chat pipeline so the avatar says something. Adding a check server-side
  * needs no change here. See `server/src/perception/`.
  */
@@ -22,9 +22,10 @@ export interface PerceptionCheckInfo {
 export interface PerceptionVerdict {
   label: string;
   /**
-   * Set only when this verdict should make the avatar speak: a short
-   * `(perception:name=label)` token to inject as a hidden turn. How the avatar
-   * reacts to it lives in the server's system prompt, not here.
+   * Set only when this verdict should make the avatar speak: a plain-language
+   * status line (e.g. `(perception: 사용자가 카메라 화면에서 사라졌습니다)`) to
+   * inject as a hidden turn. How the avatar reacts to it lives in the server's
+   * system prompt, not here.
    */
   signal?: string;
 }
