@@ -43,3 +43,36 @@ export function storeBubbleMode(mode: BubbleMode): void {
     // storage unavailable — the pick just won't survive a reload
   }
 }
+
+// ── 상황 인지 (perception) on/off ───────────────────────────────────────────
+//
+// Stored as the set of check names the user switched OFF, so anything the
+// server advertises that isn't listed — including a check added later — is on
+// by default without a migration.
+const PERCEPTION_KEY = "hola.perceptionDisabled";
+
+/** Names of the perception checks the user switched off; empty when none. */
+export function loadDisabledPerception(): Set<string> {
+  try {
+    const raw = window.localStorage.getItem(PERCEPTION_KEY);
+    if (raw) {
+      const parsed: unknown = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        return new Set(
+          parsed.filter((v): v is string => typeof v === "string"),
+        );
+      }
+    }
+  } catch {
+    // storage unavailable or corrupt — every check stays on
+  }
+  return new Set();
+}
+
+export function storeDisabledPerception(disabled: ReadonlySet<string>): void {
+  try {
+    window.localStorage.setItem(PERCEPTION_KEY, JSON.stringify([...disabled]));
+  } catch {
+    // storage unavailable — the choice just won't survive a reload
+  }
+}

@@ -95,7 +95,7 @@ app.listen(config.port, () => {
   );
   console.log(`[hola] tools=[${tools.map((t) => t.name).join(", ")}]`);
   console.log(
-    `[hola] perception=[${perceptionChecks.map((c) => `${c.name}@${c.intervalMs}ms`).join(", ")}]`,
+    `[hola] perception=[${perceptionChecks.map((c) => `${c.name}@${c.trigger.intervalMs}ms`).join(", ")}]`,
   );
   console.log(
     `[hola] rag=${config.rag.embeddingsProvider}/${config.rag.embeddingsModel} dim=${config.rag.embeddingDim} db=${config.rag.databaseUrl.replace(/\/\/[^@]*@/, "//***@")}`,

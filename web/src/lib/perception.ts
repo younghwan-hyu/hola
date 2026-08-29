@@ -2,21 +2,51 @@
  * Perception checks — the server's "look at the camera and tell me X" probes.
  *
  * The browser doesn't know what any individual check means: it fetches the list
- * from the server, polls each one on its own interval while the camera is on,
- * and if a verdict comes back carrying a `signal`, hands that text to the
- * normal chat pipeline so the avatar says something. Adding a check server-side
- * needs no change here. See `server/src/perception/`.
+ * from the server, polls each one the user hasn't switched off (the 상황 인지
+ * modal in App.tsx; the choice persists via lib/settings.ts) on its own interval
+ * while the camera is on, and if a verdict comes back carrying a `signal`, hands
+ * that text to the normal chat pipeline so the avatar says something. Adding a
+ * check server-side needs no change here — it shows up in the modal with the
+ * label/description the server sends. See `server/src/perception/`.
  */
 
-export interface PerceptionCheckInfo {
-  name: string;
-  /** How often to sample a frame while the camera is on. */
+/**
+ * How a check is driven. Only polling exists today; the tag lets the modal say
+ * "N초 폴링" for what polls and lets a future kind arrive without being
+ * mistaken for a poll.
+ */
+export interface PerceptionTrigger {
+  kind: "poll";
   intervalMs: number;
   /** Consecutive triggering verdicts required before acting (1 = immediately). */
   consecutive: number;
-  /** Long edge (px) / JPEG quality of the frame to send. */
-  frameMaxPx: number;
-  frameQuality: number;
+}
+
+/** Long edge (px) / JPEG quality of the camera frame to send. */
+export interface PerceptionFrameSpec {
+  maxPx: number;
+  quality: number;
+}
+
+export interface PerceptionCheckInfo {
+  name: string;
+  /** Name and one-line description shown in the 상황 인지 on/off modal. */
+  label: string;
+  description: string;
+  /**
+   * What the browser must provide for the check to run. "camera" is the only
+   * requirement this client knows how to satisfy; anything else the server may
+   * add later still gets a badge but counts as unmet, so the check never runs.
+   */
+  requires: string[];
+  trigger: PerceptionTrigger;
+  /** Present for camera checks: how to capture the frame that is sent. */
+  frame?: PerceptionFrameSpec;
+}
+
+/** Badge text for a requirement. Unknown ones fall back to the raw name. */
+export function requirementLabel(requirement: string): string {
+  return requirement === "camera" ? "카메라 필요" : `${requirement} 필요`;
 }
 
 export interface PerceptionVerdict {
@@ -31,16 +61,31 @@ export interface PerceptionVerdict {
 }
 
 function isCheck(value: unknown): value is PerceptionCheckInfo {
-  const c = value as PerceptionCheckInfo | null;
-  return (
-    !!c &&
-    typeof c.name === "string" &&
-    typeof c.intervalMs === "number" &&
-    c.intervalMs > 0 &&
-    typeof c.consecutive === "number" &&
-    typeof c.frameMaxPx === "number" &&
-    typeof c.frameQuality === "number"
-  );
+  const c = value as Record<string, unknown> | null;
+  if (
+    !c ||
+    typeof c.name !== "string" ||
+    typeof c.label !== "string" ||
+    typeof c.description !== "string"
+  )
+    return false;
+  const requires = c.requires;
+  if (!Array.isArray(requires) || !requires.every((r) => typeof r === "string"))
+    return false;
+  const t = c.trigger as Record<string, unknown> | null | undefined;
+  if (
+    !t ||
+    t.kind !== "poll" ||
+    typeof t.intervalMs !== "number" ||
+    t.intervalMs <= 0 ||
+    typeof t.consecutive !== "number"
+  )
+    return false;
+  // A camera check without a frame spec couldn't be captured for.
+  const f = c.frame as Record<string, unknown> | null | undefined;
+  const hasFrame = !!f && typeof f.maxPx === "number" && typeof f.quality === "number";
+  if (requires.includes("camera") && !hasFrame) return false;
+  return true;
 }
 
 /**

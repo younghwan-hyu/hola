@@ -19,9 +19,10 @@ const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
 
 /**
  * Perception checks: `GET` advertises what the client should poll while the
- * camera is on, `POST` runs one check against a frame. Both are generic over
- * the check registry (`server/src/perception`), so adding a check needs no
- * change here or in the browser.
+ * camera is on (plus the label/description its 상황 인지 on/off modal shows),
+ * `POST` runs one check against a frame. Both are generic over the check
+ * registry (`server/src/perception`), so adding a check needs no change here
+ * or in the browser.
  */
 export function createPerceptionRouter(deps: Deps): Router {
   const router = Router();
@@ -33,10 +34,11 @@ export function createPerceptionRouter(deps: Deps): Router {
   router.get("/perception", (_req, res) => {
     const info: PerceptionCheckInfo[] = deps.checks.map((check) => ({
       name: check.name,
-      intervalMs: check.intervalMs,
-      consecutive: check.consecutive,
-      frameMaxPx: check.frameMaxPx,
-      frameQuality: check.frameQuality,
+      label: check.label,
+      description: check.description,
+      requires: check.requires,
+      trigger: check.trigger,
+      ...(check.frame ? { frame: check.frame } : {}),
     }));
     res.json(info);
   });

@@ -16,15 +16,21 @@ import type { PerceptionCheck } from "./types.ts";
 export function createPresenceCheck(): PerceptionCheck {
   return {
     name: "presence",
-    intervalMs: 3000,
-    // Speak up on the first frame without a face. Note a face-level check does
-    // flicker on ordinary moments — a glance down at the keyboard, a turn to a
-    // second monitor — so raise this to 2 (~6s) if the nudges feel trigger-happy.
-    consecutive: 1,
+    label: "존재 인식",
+    description: "얼굴이 카메라에서 사라지면 어디 갔는지 묻습니다.",
+    requires: ["camera"],
+    trigger: {
+      kind: "poll",
+      intervalMs: 3000,
+      // Speak up on the first frame without a face. Note a face-level check
+      // does flicker on ordinary moments — a glance down at the keyboard, a
+      // turn to a second monitor — so raise this to 2 (~6s) if the nudges feel
+      // trigger-happy.
+      consecutive: 1,
+    },
     // A face is still easy to spot at low resolution, and OpenAI bills a "low
     // detail" image at a flat token rate — keep the polling frame small.
-    frameMaxPx: 256,
-    frameQuality: 0.5,
+    frame: { maxPx: 256, quality: 0.5 },
     prompt:
       '이 사진에 사람의 얼굴이 보이면 "present", 보이지 않으면 "absent"라고만 답하라. 얼굴이 화면에 나오기만 하면 다른 곳을 보고 있든, 옆얼굴이든, 일부가 가려졌든, 어둡든 상관없이 "present"다. 아무도 없거나, 몸이나 손만 나오고 얼굴은 화면 밖으로 벗어났거나, 뒤통수만 보여서 얼굴을 볼 수 없을 때만 "absent"다. 다른 말은 절대 하지 마라.',
     // "present" first: an answer we can't parse must not trigger the avatar.

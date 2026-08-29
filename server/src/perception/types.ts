@@ -3,23 +3,57 @@ export interface PerceptionInput {
   image: { bytes: Buffer; mimeType: string };
 }
 
+/** A browser-side capability a check can't run without. */
+export type PerceptionRequirement = "camera";
+
 /**
- * The part of a check the browser needs in order to poll it. Returned by
- * `GET /api/perception` — the prompt and trigger lines stay on the server.
+ * How the browser drives a check. Only polling exists today; it's a tagged
+ * shape so a differently-driven check can be added later without the client
+ * misreading its fields.
  */
-export interface PerceptionCheckInfo {
-  /** Stable id; also the path segment of `POST /api/perception/:name`. */
-  name: string;
-  /** How often the client samples a frame while the camera is on. */
+export interface PerceptionTrigger {
+  kind: "poll";
+  /** How often the client samples while the check is able to run. */
   intervalMs: number;
   /**
    * How many consecutive triggering verdicts before acting. 1 fires on the
    * first one; raise it to debounce a check that flickers.
    */
   consecutive: number;
-  /** Long edge (px) / JPEG quality of the frame the client should send. */
-  frameMaxPx: number;
-  frameQuality: number;
+}
+
+/** Long edge (px) / JPEG quality of the camera frame the client should send. */
+export interface PerceptionFrameSpec {
+  maxPx: number;
+  quality: number;
+}
+
+/**
+ * The part of a check the browser needs in order to run it. Returned by
+ * `GET /api/perception` — the prompt and trigger lines stay on the server.
+ */
+export interface PerceptionCheckInfo {
+  /** Stable id; also the path segment of `POST /api/perception/:name`. */
+  name: string;
+  /**
+   * Human-readable name and one-line description, shown in the web client's
+   * 상황 인지 modal where the user switches checks on and off. They live here
+   * rather than in the client so "one check = one file" still holds: a new
+   * check brings its own wording and appears in the modal with no client change.
+   */
+  label: string;
+  description: string;
+  /**
+   * What the browser must have for this check to run at all. The client shows
+   * a badge per entry ("카메라 필요") and only drives the check while every
+   * requirement is met — a camera check that is switched on simply waits, and
+   * says so, until the camera comes on.
+   */
+  requires: readonly PerceptionRequirement[];
+  /** How the check is driven (and, for polling, how often). Shown as a badge. */
+  trigger: PerceptionTrigger;
+  /** Camera capture spec; required when `requires` includes "camera". */
+  frame?: PerceptionFrameSpec;
 }
 
 /**

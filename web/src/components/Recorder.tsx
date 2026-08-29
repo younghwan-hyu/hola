@@ -96,8 +96,8 @@ export function Recorder({ disabled, onCaptured, size = "default" }: Props) {
         className={
           isLg
             ? recording
-              ? "h-16 w-16 shrink-0 rounded-full shadow-lg shadow-black/30 ring-4 ring-destructive/40"
-              : "h-16 w-16 shrink-0 rounded-full border border-white/15 bg-black/40 text-white shadow-lg shadow-black/30 backdrop-blur hover:bg-black/55 hover:text-white"
+              ? "h-14 w-14 shrink-0 rounded-full sm:h-16 sm:w-16 shadow-lg shadow-black/30 ring-4 ring-destructive/40"
+              : "h-14 w-14 shrink-0 rounded-full sm:h-16 sm:w-16 border border-white/15 bg-black/40 text-white shadow-lg shadow-black/30 backdrop-blur hover:bg-black/55 hover:text-white"
             : "h-11 w-11 shrink-0"
         }
       >

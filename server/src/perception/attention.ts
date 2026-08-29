@@ -14,18 +14,23 @@ import type { PerceptionCheck } from "./types.ts";
 export function createAttentionCheck(): PerceptionCheck {
   return {
     name: "attention",
-    // Slower than presence: looking away is only worth mentioning once it
-    // lasts, and this shares the polling budget with the presence check.
-    intervalMs: 4000,
-    // Ask as soon as one frame catches them looking. Raise to 2 (~10s) if you'd
-    // rather not interrupt over a glance at a notification.
-    consecutive: 1,
+    label: "집중도 인식",
+    description: "손에 든 휴대폰·책 등을 들여다보고 있으면 무엇을 보는지 묻습니다.",
+    requires: ["camera"],
+    trigger: {
+      kind: "poll",
+      // Slower than presence: looking away is only worth mentioning once it
+      // lasts, and this shares the polling budget with the presence check.
+      intervalMs: 4000,
+      // Ask as soon as one frame catches them looking. Raise to 2 (~10s) if
+      // you'd rather not interrupt over a glance at a notification.
+      consecutive: 1,
+    },
     // Spotting a phone in someone's hands needs more pixels than spotting a
     // person, so this frame is larger than presence's. Still under the 512px
     // that OpenAI's flat-rate "low detail" mode downsamples to, so on OpenAI
     // it bills exactly the same as the small one.
-    frameMaxPx: 448,
-    frameQuality: 0.6,
+    frame: { maxPx: 448, quality: 0.6 },
     prompt:
       '이 사진 속 사람이 손에 든 휴대폰, 태블릿, 책, 종이 같은 물건을 내려다보거나 들여다보고 있으면 "distracted", 그렇지 않으면 "attentive"라고만 답하라. 사람이 없거나 얼굴이 보이지 않으면 "attentive"다. 물건을 들고만 있고 시선이 그쪽을 향하지 않으면 "attentive"다. 다른 말은 절대 하지 마라.',
     // "attentive" first: an answer we can't parse must not trigger the avatar.

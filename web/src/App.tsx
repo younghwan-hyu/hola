@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useMemo,
   useRef,
   useState,
   type FormEvent,
@@ -14,6 +15,7 @@ import {
   Loader2,
   MessageSquare,
   MoreHorizontal,
+  ScanFace,
   Send,
   Settings,
   Smile,
@@ -46,6 +48,7 @@ import {
 } from "@/lib/avatars";
 import {
   fetchPerceptionChecks,
+  requirementLabel,
   runPerceptionCheck,
   type PerceptionCheckInfo,
 } from "@/lib/perception";
@@ -53,7 +56,9 @@ import { GESTURES, isAvatarGesture, type AvatarGesture } from "@/lib/gestures";
 import {
   BUBBLE_MODES,
   loadBubbleMode,
+  loadDisabledPerception,
   storeBubbleMode,
+  storeDisabledPerception,
   type BubbleMode,
 } from "@/lib/settings";
 import { base64ToArrayBuffer, StreamingPcmPlayer } from "@/lib/audio";
@@ -72,6 +77,26 @@ interface Bubble {
 }
 
 const newId = () => Math.random().toString(36).slice(2, 10);
+
+/**
+ * What one perception check is doing right now, as shown in the 상황 인지
+ * modal. Precedence: switched off > a requirement (camera) missing > a nudge
+ * already out and waiting on the user > running.
+ */
+type CheckStatus = "off" | "blocked" | "waiting" | "running";
+
+const CHECK_STATUS_DOT: Record<CheckStatus, string> = {
+  running: "bg-emerald-400",
+  waiting: "bg-amber-400",
+  blocked: "bg-amber-400",
+  off: "bg-white/25",
+};
+
+/** "3" for 3000ms, "2.5" for 2500ms — for the "N초 폴링" badge. */
+const formatSeconds = (ms: number): string => {
+  const s = ms / 1000;
+  return Number.isInteger(s) ? String(s) : s.toFixed(1);
+};
 
 const MAX_BUBBLES = 2; // bubbles the inline mode shows at once
 const EXIT_MS = 350; // how long a bubble that left the inline window animates out
@@ -120,8 +145,8 @@ export default function App() {
   const [avatar, setAvatar] = useState<string | null>(null);
   const [avatarOpen, setAvatarOpen] = useState(false);
   // Input is voice-first: collapsed shows a row of doc viewer + mic + camera +
-  // file upload + "..."; expanding reveals the full bar (text input + settings +
-  // avatar + gesture + mic + send).
+  // file upload + perception + "..."; expanding reveals the full bar (text
+  // input + settings + avatar + gesture + mic + send).
   const [expanded, setExpanded] = useState(false);
   // Document upload (RAG) is independent of the chat `busy` state.
   const [uploading, setUploading] = useState(false);
@@ -140,10 +165,53 @@ export default function App() {
   // crop. null until the first `loadedmetadata` (falls back to 16:9).
   const [previewAspect, setPreviewAspect] = useState<number | null>(null);
 
-  // Perception checks the server wants polled while the camera is on.
+  // Perception checks the server advertises (label, requirements, trigger —
+  // see lib/perception.ts). Which of them actually run is decided below.
   const [perceptionChecks, setPerceptionChecks] = useState<
     PerceptionCheckInfo[]
   >([]);
+  // 상황 인지 modal: the checks the user switched off (persisted, see
+  // lib/settings.ts). Whatever the server advertises is on unless listed here.
+  const [perceptionDisabled, setPerceptionDisabled] = useState<Set<string>>(
+    loadDisabledPerception,
+  );
+  const [perceptionOpen, setPerceptionOpen] = useState(false);
+  /**
+   * True from the moment a check makes the avatar speak until the user answers
+   * (or the camera is toggled). The render-side mirror of `perceptionArmed`
+   * below: the ref is what the polling logic reads, this is what the modal
+   * shows ("말을 걸고 응답 대기 중").
+   */
+  const [nudgeOut, setNudgeOut] = useState(false);
+  /**
+   * Whether the browser currently satisfies one of a check's `requires`. The
+   * camera is the only requirement today; anything the server may add later is
+   * unmet here, so a check needing it shows its badge but never runs.
+   */
+  const requirementMet = (requirement: string): boolean =>
+    requirement === "camera" && cameraOn;
+  // The checks actually driven: switched on AND every requirement met. Memoised
+  // so the polling effect below only restarts its timers when this changes.
+  const activeChecks = useMemo(
+    () =>
+      perceptionChecks.filter(
+        (c) => !perceptionDisabled.has(c.name) && c.requires.every(requirementMet),
+      ),
+    // requirementMet is a closure over cameraOn, hence the dep.
+    [perceptionChecks, perceptionDisabled, cameraOn],
+  );
+  // True exactly when perception is running (≥1 check on with its requirements
+  // met). Drives the 상황 인지 button's highlight and the modal's status line.
+  const perceptionLive = activeChecks.length > 0;
+  /** What the modal shows for a check — see {@link CheckStatus}. */
+  const checkStatus = (check: PerceptionCheckInfo): CheckStatus =>
+    perceptionDisabled.has(check.name)
+      ? "off"
+      : !check.requires.every(requirementMet)
+        ? "blocked"
+        : nudgeOut
+          ? "waiting"
+          : "running";
 
   const playerRef = useRef<StreamingPcmPlayer>(new StreamingPcmPlayer());
   /**
@@ -176,6 +244,12 @@ export default function App() {
    * at the same instant.
    */
   const perceptionTicking = useRef(false);
+  /**
+   * Mirror of `perceptionDisabled` for the polling tick: a check switched off
+   * while its verdict is still in flight must not nudge when it lands.
+   */
+  const perceptionDisabledRef = useRef(perceptionDisabled);
+  perceptionDisabledRef.current = perceptionDisabled;
   // aiId of a turn whose voice the user stopped, so late-arriving tts_chunks
   // don't reappend audio or resurrect its stop button.
   const stoppedTurnRef = useRef<string | null>(null);
@@ -500,6 +574,7 @@ export default function App() {
     // the avatar waits for an answer rather than asking again.
     if (!payload.hidden) {
       perceptionArmed.current = true;
+      setNudgeOut(false);
       perceptionState.current.clear();
     }
     setBusy(true);
@@ -682,23 +757,34 @@ export default function App() {
     if (perceptionTicking.current) return;
     perceptionTicking.current = true;
     try {
+      // Every check today is camera-fed (activeChecks only holds checks whose
+      // requirements are met, so the camera is on here): capture at its spec.
+      if (!check.frame) return;
       const frame = await captureFrame(
-        check.frameMaxPx,
-        check.frameQuality,
+        check.frame.maxPx,
+        check.frame.quality,
       ).catch(() => null);
       if (!frame) return;
       const verdict = await runPerceptionCheck(check.name, frame);
-      // Re-check: a turn may have started, another check may have spoken, or
-      // the camera may have gone off while the request was in flight.
-      if (!verdict || turnInFlight.current || !perceptionArmed.current) return;
+      // Re-check: a turn may have started, another check may have spoken, the
+      // camera may have gone off, or this check may have been switched off in
+      // the 상황 인지 modal while the request was in flight.
+      if (
+        !verdict ||
+        turnInFlight.current ||
+        !perceptionArmed.current ||
+        perceptionDisabledRef.current.has(check.name)
+      )
+        return;
 
       const prev = perceptionState.current.get(check.name);
       const count = prev?.label === verdict.label ? prev.count + 1 : 1;
       perceptionState.current.set(check.name, { label: verdict.label, count });
-      if (verdict.signal && count >= check.consecutive) {
+      if (verdict.signal && count >= check.trigger.consecutive) {
         // Disarm synchronously, before send() yields: from here on every other
         // check bails at the guard above, so only this one nudge goes out.
         perceptionArmed.current = false;
+        setNudgeOut(true);
         void send({ text: verdict.signal, hidden: true });
       }
     } finally {
@@ -706,26 +792,49 @@ export default function App() {
     }
   };
 
-  // Poll each check on its own interval while the camera is on. The checks are
-  // independent here, but they share one arm, so together they still nudge at
-  // most once (see perceptionArmed / the tick above).
+  // Arm perception with the camera. Kept apart from the timers below so that
+  // switching a check on or off (which restarts the timers) doesn't re-arm a
+  // nudge that's already out and waiting on the user's answer.
   useEffect(() => {
-    if (!cameraOn || perceptionChecks.length === 0) return;
+    if (!cameraOn) return;
     perceptionArmed.current = true;
+    setNudgeOut(false);
     perceptionState.current.clear();
-    const timers = perceptionChecks.map((check) =>
-      window.setInterval(() => {
-        void perceptionTickRef.current?.(check);
-      }, check.intervalMs),
-    );
     return () => {
-      for (const t of timers) window.clearInterval(t);
       // Start clean next time the camera comes on — and stay disarmed until
       // then, so a verdict still in flight can't nudge with the camera off.
       perceptionArmed.current = false;
+      setNudgeOut(false);
       perceptionState.current.clear();
     };
-  }, [cameraOn, perceptionChecks]);
+  }, [cameraOn]);
+
+  // Drive each check that is switched on and has its requirements met, on its
+  // own interval. The checks are independent here, but they share one arm, so
+  // together they still nudge at most once (see perceptionArmed / the tick).
+  useEffect(() => {
+    if (activeChecks.length === 0) return;
+    const timers = activeChecks.map((check) =>
+      window.setInterval(() => {
+        void perceptionTickRef.current?.(check);
+      }, check.trigger.intervalMs),
+    );
+    return () => {
+      for (const t of timers) window.clearInterval(t);
+    };
+  }, [activeChecks]);
+
+  // 상황 인지 modal: switch one check on or off. The polling effect picks the
+  // change up through activeChecks; a tick already in flight for a check just
+  // switched off bails on perceptionDisabledRef instead.
+  const togglePerception = (name: string) => {
+    const next = new Set(perceptionDisabled);
+    if (!next.delete(name)) next.add(name);
+    setPerceptionDisabled(next);
+    storeDisabledPerception(next);
+    // Drop its debounce count so switching it back on starts from a clean slate.
+    perceptionState.current.delete(name);
+  };
 
   const onSubmit = (e: FormEvent) => {
     e.preventDefault();
@@ -861,15 +970,17 @@ export default function App() {
     );
   };
 
-  // Voice-first input. Collapsed: doc viewer + mic + camera + file upload + "..."
-  // in a row; "..." reveals the full bar (text input + settings + avatar +
-  // gesture + mic + send). It floats over the 3D view in inline mode and sits
-  // under the log as a normal row in separate mode, so only the positioning
-  // classes differ.
+  // Voice-first input. Collapsed: doc viewer + mic + camera + file upload +
+  // perception + "..." in a row; "..." reveals the full bar (text input +
+  // settings + avatar + gesture + mic + send). It floats over the 3D view in
+  // inline mode and sits under the log as a normal row in separate mode, so
+  // only the positioning classes differ. On phone widths the buttons shrink and
+  // pack tighter so all six still fit one row (a second row would sit under the
+  // inline bubbles); flex-wrap is only a safety net for even narrower screens.
   const floatingInput = bubbleMode === "inline";
   const inputBar = !expanded ? (
     <div
-      className={`flex items-center justify-center gap-4 ${
+      className={`flex flex-wrap items-center justify-center gap-2 sm:gap-4 sm:px-4 ${
         floatingInput
           ? "absolute inset-x-0 bottom-6"
           : "shrink-0 border-t border-white/10 bg-black/20 py-4"
@@ -885,7 +996,7 @@ export default function App() {
           e.target.value = "";
         }}
       />
-      {/* Order: 문서(doc viewer) - 음성(mic) - 카메라(camera) - 파일(upload) - ...(more). */}
+      {/* Order: 문서(doc viewer) - 음성(mic) - 카메라(camera) - 파일(upload) - 상황 인지(perception) - ...(more). */}
       <Button
         type="button"
         variant="ghost"
@@ -893,8 +1004,8 @@ export default function App() {
         title={docMode ? "문서 조회 모드 끄기" : "문서 조회 모드"}
         className={
           docMode
-            ? "h-16 w-16 shrink-0 rounded-full bg-white text-black shadow-lg shadow-black/30 hover:bg-white/90 hover:text-black"
-            : "h-16 w-16 shrink-0 rounded-full border border-white/15 bg-black/40 text-white shadow-lg shadow-black/30 backdrop-blur hover:bg-black/55 hover:text-white"
+            ? "h-14 w-14 shrink-0 rounded-full sm:h-16 sm:w-16 bg-white text-black shadow-lg shadow-black/30 hover:bg-white/90 hover:text-black"
+            : "h-14 w-14 shrink-0 rounded-full sm:h-16 sm:w-16 border border-white/15 bg-black/40 text-white shadow-lg shadow-black/30 backdrop-blur hover:bg-black/55 hover:text-white"
         }
         onClick={() => setDocMode((v) => !v)}
       >
@@ -912,8 +1023,8 @@ export default function App() {
         title={cameraOn ? "카메라 끄기" : "카메라 켜기"}
         className={
           cameraOn
-            ? "h-16 w-16 shrink-0 rounded-full bg-white text-black shadow-lg shadow-black/30 hover:bg-white/90 hover:text-black"
-            : "h-16 w-16 shrink-0 rounded-full border border-white/15 bg-black/40 text-white shadow-lg shadow-black/30 backdrop-blur hover:bg-black/55 hover:text-white"
+            ? "h-14 w-14 shrink-0 rounded-full sm:h-16 sm:w-16 bg-white text-black shadow-lg shadow-black/30 hover:bg-white/90 hover:text-black"
+            : "h-14 w-14 shrink-0 rounded-full sm:h-16 sm:w-16 border border-white/15 bg-black/40 text-white shadow-lg shadow-black/30 backdrop-blur hover:bg-black/55 hover:text-white"
         }
         onClick={() => void toggleCamera()}
       >
@@ -925,7 +1036,7 @@ export default function App() {
         size="icon"
         disabled={uploading}
         title="문서 업로드"
-        className="h-16 w-16 shrink-0 rounded-full border border-white/15 bg-black/40 text-white shadow-lg shadow-black/30 backdrop-blur hover:bg-black/55 hover:text-white"
+        className="h-14 w-14 shrink-0 rounded-full sm:h-16 sm:w-16 border border-white/15 bg-black/40 text-white shadow-lg shadow-black/30 backdrop-blur hover:bg-black/55 hover:text-white"
         onClick={() => fileInputRef.current?.click()}
       >
         {uploading ? (
@@ -934,11 +1045,27 @@ export default function App() {
           <FileUp className="h-6 w-6" />
         )}
       </Button>
+      {/* 상황 인지: opens the per-check on/off modal. Highlighted (like the
+          camera/doc buttons) only while perception is actually running. */}
       <Button
         type="button"
         variant="ghost"
         size="icon"
-        className="h-12 w-12 shrink-0 rounded-full border border-white/15 bg-black/40 text-white shadow-lg shadow-black/30 backdrop-blur hover:bg-black/55 hover:text-white"
+        title={perceptionLive ? "상황 인지 (동작 중)" : "상황 인지"}
+        className={
+          perceptionLive
+            ? "h-14 w-14 shrink-0 rounded-full sm:h-16 sm:w-16 bg-white text-black shadow-lg shadow-black/30 hover:bg-white/90 hover:text-black"
+            : "h-14 w-14 shrink-0 rounded-full sm:h-16 sm:w-16 border border-white/15 bg-black/40 text-white shadow-lg shadow-black/30 backdrop-blur hover:bg-black/55 hover:text-white"
+        }
+        onClick={() => setPerceptionOpen(true)}
+      >
+        <ScanFace className="h-6 w-6" />
+      </Button>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        className="h-10 w-10 shrink-0 rounded-full sm:h-12 sm:w-12 border border-white/15 bg-black/40 text-white shadow-lg shadow-black/30 backdrop-blur hover:bg-black/55 hover:text-white"
         onClick={() => setExpanded(true)}
       >
         <MoreHorizontal className="h-5 w-5" />
@@ -1313,6 +1440,123 @@ export default function App() {
                     {label}
                   </Button>
                 ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 상황 인지 modal — per-check on/off for the perception checks. The
+            list, wording, requirement badges and trigger badges all come from
+            GET /api/perception; the status line under each check reflects the
+            switch, the camera and whether a nudge is out (see CheckStatus).
+            Deliberately no summary and no camera control here — the camera is
+            operated from the main row, and each item states its own status. */}
+        {perceptionOpen && (
+          <div
+            className="absolute inset-0 z-10 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm"
+            onClick={() => setPerceptionOpen(false)}
+          >
+            <div
+              className="relative w-full max-w-xs rounded-2xl border border-white/10 bg-zinc-900/95 p-5 shadow-2xl"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <button
+                type="button"
+                onClick={() => setPerceptionOpen(false)}
+                className="absolute right-3 top-3 text-white/50 transition-colors hover:text-white"
+              >
+                <X className="h-5 w-5" />
+              </button>
+              <h2 className="mb-4 text-base font-semibold text-white">상황 인지</h2>
+              {perceptionChecks.length === 0 && (
+                <p className="text-xs text-white/50">
+                  서버에 등록된 상황 인지 항목이 없습니다.
+                </p>
+              )}
+              <div className="flex flex-col gap-2">
+                {perceptionChecks.map((check) => {
+                  const enabled = !perceptionDisabled.has(check.name);
+                  const status = checkStatus(check);
+                  const missing = check.requires.filter(
+                    (r) => !requirementMet(r),
+                  );
+                  const statusText =
+                    status === "off"
+                      ? "꺼짐"
+                      : status === "blocked"
+                        ? missing.every((r) => r === "camera")
+                          ? "카메라를 켜면 동작"
+                          : "이 브라우저에서는 사용할 수 없음"
+                        : status === "waiting"
+                          ? "말을 걸고 응답 대기 중"
+                          : "동작 중";
+                  const badge =
+                    "rounded-full border px-1.5 py-0.5 text-[10px] leading-none";
+                  return (
+                    <div
+                      key={check.name}
+                      className="flex items-center gap-3 rounded-lg border border-white/10 bg-white/5 px-3 py-2.5"
+                    >
+                      <div
+                        className={`min-w-0 flex-1 ${status === "off" ? "opacity-60" : ""}`}
+                      >
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <p className="text-sm font-medium text-white">
+                            {check.label}
+                          </p>
+                          {/* Requirement badges: amber while the check is on
+                              but that requirement is what's holding it back. */}
+                          {check.requires.map((r) => (
+                            <span
+                              key={r}
+                              className={`${badge} ${
+                                status === "blocked" && !requirementMet(r)
+                                  ? "border-amber-400/40 bg-amber-400/15 text-amber-200"
+                                  : "border-white/15 bg-white/10 text-white/70"
+                              }`}
+                            >
+                              {requirementLabel(r)}
+                            </span>
+                          ))}
+                          {check.trigger.kind === "poll" && (
+                            <span
+                              className={`${badge} border-white/15 bg-white/10 text-white/70`}
+                            >
+                              {formatSeconds(check.trigger.intervalMs)}초 폴링
+                            </span>
+                          )}
+                        </div>
+                        <p className="mt-1 text-xs leading-snug text-white/50">
+                          {check.description}
+                        </p>
+                        <p className="mt-1.5 flex items-center gap-1.5 text-[10px] text-white/45">
+                          <span
+                            className={`inline-block h-1.5 w-1.5 rounded-full ${CHECK_STATUS_DOT[status]}`}
+                          />
+                          {statusText}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={enabled}
+                        aria-label={`${check.label} ${enabled ? "끄기" : "켜기"}`}
+                        onClick={() => togglePerception(check.name)}
+                        className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${
+                          enabled ? "bg-white" : "bg-white/20"
+                        }`}
+                      >
+                        <span
+                          className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full transition-transform ${
+                            enabled
+                              ? "translate-x-5 bg-black"
+                              : "translate-x-0 bg-white/70"
+                          }`}
+                        />
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
             </div>
           </div>
