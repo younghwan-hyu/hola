@@ -1,5 +1,6 @@
 import type { AiProvider, AiSession } from "../ai/index.ts";
-import type { SttProvider } from "../stt/index.ts";
+import type { VoiceCheck, VoiceFeatures } from "../perception/index.ts";
+import type { SttProvider, SttWord } from "../stt/index.ts";
 import type { TtsProvider } from "../tts/index.ts";
 import { GestureCommandParser, KNOWN_GESTURES } from "./gesture-parser.ts";
 import { SentenceSplitter } from "./sentence-splitter.ts";
@@ -13,6 +14,8 @@ export interface PipelineDeps {
   sentenceBoundaryChars: string;
   /** Gestures allowed through to the client (config.gestures, GESTURES env). */
   enabledGestures: ReadonlySet<string>;
+  /** Turn-driven voice checks (perception/voice.ts); run on spoken turns. */
+  voiceChecks: readonly VoiceCheck[];
 }
 
 export interface PipelineInput {
@@ -22,6 +25,12 @@ export interface PipelineInput {
   image?: { bytes: Buffer; mimeType: string };
   /** Optional doc-viewer page capture for this turn (see AiInput.document). */
   document?: { bytes: Buffer; mimeType: string };
+  /**
+   * Spoken turns only: the tone features the browser measured on its recording
+   * and the names of the voice checks the user has switched on. Absent when
+   * the client sent none — then no voice check runs.
+   */
+  voice?: { features?: VoiceFeatures; checks: readonly string[] };
 }
 
 /**
@@ -38,6 +47,7 @@ export async function runPipeline(
 ): Promise<void> {
   try {
     let userText: string;
+    let words: SttWord[] = [];
     if (input.audio) {
       const sttStart = Date.now();
       const sttResult = await deps.stt.recognize({
@@ -45,6 +55,7 @@ export async function runPipeline(
         mimeType: input.audio.mimeType,
       });
       userText = sttResult.text;
+      words = sttResult.words;
       session.emit({ type: "stt", text: userText, source: "audio" });
       session.emit({ type: "timing", phase: "stt", ms: Date.now() - sttStart });
     } else if (input.text !== undefined) {
@@ -57,6 +68,32 @@ export async function runPipeline(
     if (userText.trim().length === 0) {
       session.emit({ type: "done" });
       return;
+    }
+
+    // Voice checks judge HOW this turn was spoken (pace from the STT word
+    // timings, tone from the browser's measurements) and, when it stands out,
+    // annotate the turn itself so the answer to it adapts — the model sees what
+    // was said plus how it sounded, in one message, with no extra round-trip.
+    // Only spoken turns, and only the checks the client has switched on. The
+    // `stt` event above carries the bare transcript, so the user bubble never
+    // shows the annotation.
+    let prompt = userText;
+    if (input.audio && input.voice) {
+      for (const check of deps.voiceChecks) {
+        if (!input.voice.checks.includes(check.name)) continue;
+        const verdict = check.analyze(
+          { transcript: userText, words, features: input.voice.features },
+          deps.aiSession.key,
+        );
+        session.emit({
+          type: "perception",
+          check: check.name,
+          label: verdict.label,
+          text: verdict.text ?? verdict.label,
+          ...(verdict.signal ? { signal: verdict.signal } : {}),
+        });
+        if (verdict.signal) prompt += `\n\n${verdict.signal}`;
+      }
     }
 
     const splitter = new SentenceSplitter(deps.sentenceBoundaryChars);
@@ -130,7 +167,7 @@ export async function runPipeline(
     const aiStart = Date.now();
     let aiTtftReported = false;
     for await (const delta of deps.ai.stream(
-      { prompt: userText, image: input.image, document: input.document },
+      { prompt, image: input.image, document: input.document },
       deps.aiSession,
       session.signal,
     )) {

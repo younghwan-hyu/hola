@@ -3,6 +3,7 @@ import multer from "multer";
 
 import type { Config } from "../config.ts";
 import type { AiProvider, AiSession } from "../ai/index.ts";
+import type { VoiceCheck, VoiceFeatures } from "../perception/index.ts";
 import type { SttProvider } from "../stt/index.ts";
 import type { TtsProvider } from "../tts/index.ts";
 import { runPipeline } from "../pipeline/pipeline.ts";
@@ -16,9 +17,61 @@ interface Deps {
   ai: AiProvider;
   aiSession: AiSession;
   tts: TtsProvider;
+  /** Turn-driven voice checks, run on spoken turns (perception/voice.ts). */
+  voiceChecks: readonly VoiceCheck[];
 }
 
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024; // 8MB cap on camera frames.
+
+/** Comma-separated check names -> list (the `perception` form field). */
+function parseNames(raw: unknown): string[] {
+  return typeof raw === "string"
+    ? raw
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0)
+    : [];
+}
+
+/**
+ * The browser's tone measurements (the `voice` form field, JSON). Anything
+ * malformed is treated as "no measurements" rather than a 400: the turn is
+ * still a perfectly good chat turn, the voice check just gets less to go on.
+ */
+function parseVoiceFeatures(raw: unknown): VoiceFeatures | undefined {
+  if (typeof raw !== "string") return undefined;
+  let v: unknown;
+  try {
+    v = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (!v || typeof v !== "object") return undefined;
+  const o = v as Record<string, unknown>;
+  const num = (x: unknown): x is number =>
+    typeof x === "number" && Number.isFinite(x);
+  const hz = (x: unknown): number | null | undefined =>
+    x === null ? null : num(x) ? x : undefined;
+  const f0MeanHz = hz(o.f0MeanHz);
+  const f0StdHz = hz(o.f0StdHz);
+  if (
+    !num(o.durationSec) ||
+    !num(o.speechSec) ||
+    !num(o.rmsMean) ||
+    !num(o.voicedRatio) ||
+    f0MeanHz === undefined ||
+    f0StdHz === undefined
+  )
+    return undefined;
+  return {
+    durationSec: o.durationSec,
+    speechSec: o.speechSec,
+    rmsMean: o.rmsMean,
+    voicedRatio: o.voicedRatio,
+    f0MeanHz,
+    f0StdHz,
+  };
+}
 
 export function createChatRouter(deps: Deps): Router {
   const router = Router();
@@ -46,6 +99,14 @@ export function createChatRouter(deps: Deps): Router {
       const image = files?.image?.[0];
       // Doc-viewer mode: a capture of the PDF page the user is looking at.
       const docImage = files?.document?.[0];
+      // Spoken turns may carry the browser's tone measurements and the names of
+      // the voice checks the user has switched on (see perception/voice.ts).
+      const voice = file
+        ? {
+            features: parseVoiceFeatures(req.body?.voice),
+            checks: parseNames(req.body?.perception),
+          }
+        : undefined;
 
       if (!text && !file) {
         res.status(400).json({ error: "either `text` or `audio` is required" });
@@ -95,6 +156,7 @@ export function createChatRouter(deps: Deps): Router {
           document: docImage
             ? { bytes: docImage.buffer, mimeType: docImage.mimetype }
             : undefined,
+          voice,
         },
         {
           stt: deps.stt,
@@ -103,6 +165,7 @@ export function createChatRouter(deps: Deps): Router {
           tts: deps.tts,
           sentenceBoundaryChars: deps.config.sentenceBoundaryChars,
           enabledGestures,
+          voiceChecks: deps.voiceChecks,
         },
       );
     },

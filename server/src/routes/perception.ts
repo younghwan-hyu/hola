@@ -3,6 +3,7 @@ import multer from "multer";
 
 import type { AiProvider } from "../ai/index.ts";
 import {
+  isCameraCheck,
   runPerceptionCheck,
   type PerceptionCheck,
   type PerceptionCheckInfo,
@@ -49,6 +50,13 @@ export function createPerceptionRouter(deps: Deps): Router {
       res
         .status(404)
         .json({ error: `unknown perception check: ${req.params.name}` });
+      return;
+    }
+    if (!isCameraCheck(check)) {
+      // Voice checks run inside POST /api/chat on the spoken turn itself.
+      res.status(400).json({
+        error: `${check.name} is not a camera check; it runs on voice turns via POST /api/chat`,
+      });
       return;
     }
     const image = req.file;

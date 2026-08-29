@@ -50,8 +50,10 @@ import {
   fetchPerceptionChecks,
   requirementLabel,
   runPerceptionCheck,
+  triggerLabel,
   type PerceptionCheckInfo,
 } from "@/lib/perception";
+import { analyzeVoice } from "@/lib/voice";
 import { GESTURES, isAvatarGesture, type AvatarGesture } from "@/lib/gestures";
 import {
   BUBBLE_MODES,
@@ -92,11 +94,6 @@ const CHECK_STATUS_DOT: Record<CheckStatus, string> = {
   off: "bg-white/25",
 };
 
-/** "3" for 3000ms, "2.5" for 2500ms — for the "N초 폴링" badge. */
-const formatSeconds = (ms: number): string => {
-  const s = ms / 1000;
-  return Number.isInteger(s) ? String(s) : s.toFixed(1);
-};
 
 const MAX_BUBBLES = 2; // bubbles the inline mode shows at once
 const EXIT_MS = 350; // how long a bubble that left the inline window animates out
@@ -184,9 +181,17 @@ export default function App() {
    */
   const [nudgeOut, setNudgeOut] = useState(false);
   /**
+   * Latest verdict per voice check, from the `perception` SSE event of the
+   * last spoken turn — shown in the modal ("직전 응답: 느리고 머뭇거림").
+   */
+  const [perceptionVerdicts, setPerceptionVerdicts] = useState<
+    Record<string, { label: string; text: string }>
+  >({});
+  /**
    * Whether the browser currently satisfies one of a check's `requires`. The
-   * camera is the only requirement today; anything the server may add later is
-   * unmet here, so a check needing it shows its badge but never runs.
+   * camera is the only requirement today (voice checks have none — speaking is
+   * the app's own input); anything the server may add later is unmet here, so
+   * a check needing it shows its badge but never runs.
    */
   const requirementMet = (requirement: string): boolean =>
     requirement === "camera" && cameraOn;
@@ -200,16 +205,18 @@ export default function App() {
     // requirementMet is a closure over cameraOn, hence the dep.
     [perceptionChecks, perceptionDisabled, cameraOn],
   );
-  // True exactly when perception is running (≥1 check on with its requirements
-  // met). Drives the 상황 인지 button's highlight and the modal's status line.
-  const perceptionLive = activeChecks.length > 0;
+  // True exactly when something is being polled right now (a camera check on
+  // with the camera on). Drives the 상황 인지 button's highlight. Voice checks
+  // don't count: they only act when the user speaks, so there is nothing
+  // "running" to show between turns.
+  const perceptionLive = activeChecks.some((c) => c.trigger.kind === "poll");
   /** What the modal shows for a check — see {@link CheckStatus}. */
   const checkStatus = (check: PerceptionCheckInfo): CheckStatus =>
     perceptionDisabled.has(check.name)
       ? "off"
       : !check.requires.every(requirementMet)
         ? "blocked"
-        : nudgeOut
+        : nudgeOut && check.trigger.kind === "poll"
           ? "waiting"
           : "running";
 
@@ -626,12 +633,28 @@ export default function App() {
     }
 
     try {
+      // Spoken turn: the voice checks that are on measure how it sounded — in
+      // the browser, from the recording already in hand — and the measurements
+      // travel with the turn so the server can annotate it (lib/voice.ts,
+      // server perception/voice.ts). Text turns carry nothing.
+      const voiceChecks = payload.audio
+        ? activeChecks.filter(
+            (c) => c.trigger.kind === "turn" && c.trigger.input === "voice",
+          )
+        : [];
+      const voiceFeatures =
+        payload.audio && voiceChecks.length > 0
+          ? ((await analyzeVoice(payload.audio).catch(() => null)) ?? undefined)
+          : undefined;
+
       // `hidden` is client-only — don't leak it into the request.
       const handle = await startChat({
         text: payload.text,
         audio: payload.audio,
         image,
         document: docImage,
+        voice: voiceFeatures,
+        perception: voiceChecks.map((c) => c.name),
       });
 
       if (audioSupported && handle.config.audio.encoding === "PCM") {
@@ -700,6 +723,12 @@ export default function App() {
             case "gesture":
               if (isAvatarGesture(ev.name)) avatarRef.current?.playGesture(ev.name);
               return;
+            case "perception":
+              setPerceptionVerdicts((prev) => ({
+                ...prev,
+                [ev.check]: { label: ev.label, text: ev.text },
+              }));
+              return;
             case "ai_delta":
               onAiText(ev.text, true);
               return;
@@ -747,6 +776,9 @@ export default function App() {
     ((check: PerceptionCheckInfo) => Promise<void>) | null
   >(null);
   perceptionTickRef.current = async (check) => {
+    // Only polled (camera) checks tick; voice checks run inside send().
+    const trigger = check.trigger;
+    if (trigger.kind !== "poll") return;
     // Never poll while a turn is in flight (the avatar is mid-sentence) or the
     // tab is hidden: both would waste calls, and a nudge must not interleave
     // with the user's own turn. Disarmed means some check already spoke and is
@@ -782,7 +814,7 @@ export default function App() {
       const prev = perceptionState.current.get(check.name);
       const count = prev?.label === verdict.label ? prev.count + 1 : 1;
       perceptionState.current.set(check.name, { label: verdict.label, count });
-      if (verdict.signal && count >= check.trigger.consecutive) {
+      if (verdict.signal && count >= trigger.consecutive) {
         // Disarm synchronously, before send() yields. Other checks may still
         // have requests in flight, but each verdict lands in its own event-loop
         // task and hits the re-check above, so only this one nudge goes out.
@@ -821,12 +853,17 @@ export default function App() {
   // only tick ever skipped is one whose own previous request is still pending
   // (see perceptionInFlight), so a slow check can't hold up a fast one.
   useEffect(() => {
-    if (activeChecks.length === 0) return;
-    const timers = activeChecks.map((check) =>
-      window.setInterval(() => {
-        void perceptionTickRef.current?.(check);
-      }, check.trigger.intervalMs),
+    // Only polled (camera) checks get a timer; voice checks run per turn.
+    const timers = activeChecks.flatMap((check) =>
+      check.trigger.kind === "poll"
+        ? [
+            window.setInterval(() => {
+              void perceptionTickRef.current?.(check);
+            }, check.trigger.intervalMs),
+          ]
+        : [],
     );
+    if (timers.length === 0) return;
     return () => {
       for (const t of timers) window.clearInterval(t);
     };
@@ -1488,6 +1525,7 @@ export default function App() {
                   const missing = check.requires.filter(
                     (r) => !requirementMet(r),
                   );
+                  const verdict = perceptionVerdicts[check.name];
                   const statusText =
                     status === "off"
                       ? "꺼짐"
@@ -1495,9 +1533,13 @@ export default function App() {
                         ? missing.every((r) => r === "camera")
                           ? "카메라를 켜면 동작"
                           : "이 브라우저에서는 사용할 수 없음"
-                        : status === "waiting"
-                          ? "말을 걸고 응답 대기 중"
-                          : "동작 중";
+                        : check.trigger.kind === "turn"
+                          ? `음성으로 말하면 분석${
+                              verdict ? ` · 직전 응답: ${verdict.text}` : ""
+                            }`
+                          : status === "waiting"
+                            ? "말을 걸고 응답 대기 중"
+                            : "동작 중";
                   const badge =
                     "rounded-full border px-1.5 py-0.5 text-[10px] leading-none";
                   return (
@@ -1526,13 +1568,11 @@ export default function App() {
                               {requirementLabel(r)}
                             </span>
                           ))}
-                          {check.trigger.kind === "poll" && (
-                            <span
-                              className={`${badge} border-white/15 bg-white/10 text-white/70`}
-                            >
-                              {formatSeconds(check.trigger.intervalMs)}초 폴링
-                            </span>
-                          )}
+                          <span
+                            className={`${badge} border-white/15 bg-white/10 text-white/70`}
+                          >
+                            {triggerLabel(check.trigger)}
+                          </span>
                         </div>
                         <p className="mt-1 text-xs leading-snug text-white/50">
                           {check.description}

@@ -6,6 +6,7 @@ import { config } from "./config.ts";
 import { createEmbeddingsProvider } from "./embeddings/index.ts";
 import {
   createPerceptionChecks,
+  isVoiceCheck,
   withPerceptionGuidance,
 } from "./perception/index.ts";
 import { createChatRouter } from "./routes/chat.ts";
@@ -69,7 +70,18 @@ app.get("/api/health", (_req, res) => {
   });
 });
 
-app.use("/api", createChatRouter({ config, stt, ai, aiSession, tts }));
+app.use(
+  "/api",
+  createChatRouter({
+    config,
+    stt,
+    ai,
+    aiSession,
+    tts,
+    // Voice checks don't poll: they run inside the chat turn, on the speech.
+    voiceChecks: perceptionChecks.filter(isVoiceCheck),
+  }),
+);
 app.use("/api", createDocumentsRouter({ ragStore }));
 app.use("/api", createPerceptionRouter({ checks: perceptionChecks, ai }));
 
@@ -95,7 +107,13 @@ app.listen(config.port, () => {
   );
   console.log(`[hola] tools=[${tools.map((t) => t.name).join(", ")}]`);
   console.log(
-    `[hola] perception=[${perceptionChecks.map((c) => `${c.name}@${c.trigger.intervalMs}ms`).join(", ")}]`,
+    `[hola] perception=[${perceptionChecks
+      .map((c) =>
+        c.trigger.kind === "poll"
+          ? `${c.name}@${c.trigger.intervalMs}ms`
+          : `${c.name}@${c.trigger.input}-turn`,
+      )
+      .join(", ")}]`,
   );
   console.log(
     `[hola] rag=${config.rag.embeddingsProvider}/${config.rag.embeddingsModel} dim=${config.rag.embeddingDim} db=${config.rag.databaseUrl.replace(/\/\/[^@]*@/, "//***@")}`,

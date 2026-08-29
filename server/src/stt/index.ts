@@ -9,4 +9,4 @@ export function createSttProvider(cfg: SttConfig): SttProvider {
   }
 }
 
-export type { SttProvider, SttInput, SttResult } from "./types.ts";
+export type { SttProvider, SttInput, SttResult, SttWord } from "./types.ts";

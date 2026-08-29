@@ -11,17 +11,19 @@
  */
 
 /**
- * How a check is driven. Only polling exists today; the tag lets the modal say
- * "N초 폴링" for what polls and lets a future kind arrive without being
- * mistaken for a poll.
+ * How a check is driven. Polled checks (camera) tick on a timer; turn checks
+ * run once per user turn of the given input — today, every spoken turn — and
+ * ride along with that turn (see `send` in App.tsx) instead of polling.
  */
-export interface PerceptionTrigger {
-  kind: "poll";
-  /** How often to sample while the check can run (a tick is skipped only if this check's previous request is still pending). */
-  intervalMs: number;
-  /** Consecutive triggering verdicts required before acting (1 = immediately). */
-  consecutive: number;
-}
+export type PerceptionTrigger =
+  | {
+      kind: "poll";
+      /** How often to sample while the check can run (a tick is skipped only if this check's previous request is still pending). */
+      intervalMs: number;
+      /** Consecutive triggering verdicts required before acting (1 = immediately). */
+      consecutive: number;
+    }
+  | { kind: "turn"; input: "voice" };
 
 /** Long edge (px) / JPEG quality of the camera frame to send. */
 export interface PerceptionFrameSpec {
@@ -47,7 +49,25 @@ export interface PerceptionCheckInfo {
 
 /** Badge text for a requirement. Unknown ones fall back to the raw name. */
 export function requirementLabel(requirement: string): string {
-  return requirement === "camera" ? "카메라 필요" : `${requirement} 필요`;
+  switch (requirement) {
+    case "camera":
+      return "카메라 필요";
+    default:
+      return `${requirement} 필요`;
+  }
+}
+
+/** "3" for 3000ms, "2.5" for 2500ms. */
+const formatSeconds = (ms: number): string => {
+  const s = ms / 1000;
+  return Number.isInteger(s) ? String(s) : s.toFixed(1);
+};
+
+/** Badge text for how a check is driven ("3초 폴링", "말할 때마다"). */
+export function triggerLabel(trigger: PerceptionTrigger): string {
+  return trigger.kind === "poll"
+    ? `${formatSeconds(trigger.intervalMs)}초 폴링`
+    : "말할 때마다";
 }
 
 export interface PerceptionVerdict {
@@ -74,14 +94,19 @@ function isCheck(value: unknown): value is PerceptionCheckInfo {
   if (!Array.isArray(requires) || !requires.every((r) => typeof r === "string"))
     return false;
   const t = c.trigger as Record<string, unknown> | null | undefined;
-  if (
-    !t ||
-    t.kind !== "poll" ||
-    typeof t.intervalMs !== "number" ||
-    t.intervalMs <= 0 ||
-    typeof t.consecutive !== "number"
-  )
+  if (!t) return false;
+  if (t.kind === "poll") {
+    if (
+      typeof t.intervalMs !== "number" ||
+      t.intervalMs <= 0 ||
+      typeof t.consecutive !== "number"
+    )
+      return false;
+  } else if (t.kind === "turn") {
+    if (t.input !== "voice") return false;
+  } else {
     return false;
+  }
   // A camera check without a frame spec couldn't be captured for.
   const f = c.frame as Record<string, unknown> | null | undefined;
   const hasFrame = !!f && typeof f.maxPx === "number" && typeof f.quality === "number";

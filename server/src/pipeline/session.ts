@@ -7,6 +7,15 @@ export type ChatEvent =
   | { type: "ai_delta"; text: string }
   | { type: "ai_complete"; text: string }
   | { type: "gesture"; name: string }
+  // A voice perception check's verdict on the spoken turn just transcribed
+  // (`signal` present when it was attached to the turn — see pipeline.ts).
+  | {
+      type: "perception";
+      check: string;
+      label: string;
+      text: string;
+      signal?: string;
+    }
   | { type: "tts_start"; sentenceIdx: number; text: string }
   | { type: "tts_chunk"; sentenceIdx: number; audio: string } // base64
   | { type: "tts_end"; sentenceIdx: number }

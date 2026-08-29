@@ -1,3 +1,5 @@
+import type { VoiceFeatures } from "./voice";
+
 export interface HealthInfo {
   ok: boolean;
   stt: { provider: string; model: string };
@@ -32,6 +34,10 @@ export async function startChat(input: {
   image?: Blob;
   /** 문서 조회 모드: capture of the PDF page currently on screen. */
   document?: Blob;
+  /** Spoken turns: the browser's tone measurements of the recording (lib/voice.ts). */
+  voice?: VoiceFeatures;
+  /** Spoken turns: names of the voice checks the user has switched on. */
+  perception?: string[];
 }): Promise<ChatHandle> {
   const fd = new FormData();
   if (input.text !== undefined) fd.append("text", input.text);
@@ -41,6 +47,9 @@ export async function startChat(input: {
   }
   if (input.image) fd.append("image", input.image, "camera.jpg");
   if (input.document) fd.append("document", input.document, "document.jpg");
+  if (input.voice) fd.append("voice", JSON.stringify(input.voice));
+  if (input.perception && input.perception.length > 0)
+    fd.append("perception", input.perception.join(","));
   const res = await fetch("/api/chat", { method: "POST", body: fd });
   if (!res.ok) {
     throw new Error(
@@ -87,6 +96,8 @@ export type ChatEvent =
   | { type: "ai_delta"; text: string }
   | { type: "ai_complete"; text: string }
   | { type: "gesture"; name: string }
+  /** A voice check's verdict on the spoken turn (see server perception/voice.ts). */
+  | { type: "perception"; check: string; label: string; text: string; signal?: string }
   | { type: "tts_start"; sentenceIdx: number; text: string }
   | { type: "tts_chunk"; sentenceIdx: number; audio: string }
   | { type: "tts_end"; sentenceIdx: number }
@@ -103,6 +114,7 @@ const EVENT_TYPES = [
   "ai_delta",
   "ai_complete",
   "gesture",
+  "perception",
   "tts_start",
   "tts_chunk",
   "tts_end",
