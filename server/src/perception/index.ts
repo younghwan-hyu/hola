@@ -1,5 +1,6 @@
 import type { AiProvider } from "../ai/index.ts";
 import { createAttentionCheck } from "./attention.ts";
+import { createExpressionCheck } from "./expression.ts";
 import { createPresenceCheck } from "./presence.ts";
 import type {
   PerceptionCheck,
@@ -22,7 +23,11 @@ import type {
  * be the one that actually fits the frame.
  */
 export function createPerceptionChecks(): PerceptionCheck[] {
-  return [createPresenceCheck(), createAttentionCheck()];
+  return [
+    createPresenceCheck(),
+    createAttentionCheck(),
+    createExpressionCheck(),
+  ];
 }
 
 /**
