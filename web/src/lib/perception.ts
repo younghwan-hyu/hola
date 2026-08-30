@@ -13,7 +13,9 @@
 /**
  * How a check is driven. Polled checks (camera) tick on a timer; turn checks
  * run once per user turn of the given input — today, every spoken turn — and
- * ride along with that turn (see `send` in App.tsx) instead of polling.
+ * ride along with that turn (see `send` in App.tsx) instead of polling; idle
+ * checks fire from the browser's own clock once the user has gone `afterMs`
+ * without responding.
  */
 export type PerceptionTrigger =
   | {
@@ -23,7 +25,12 @@ export type PerceptionTrigger =
       /** Consecutive triggering verdicts required before acting (1 = immediately). */
       consecutive: number;
     }
-  | { kind: "turn"; input: "voice" };
+  | { kind: "turn"; input: "voice" }
+  | {
+      kind: "idle";
+      /** How long the user may go without responding before the check fires. */
+      afterMs: number;
+    };
 
 /** Long edge (px) / JPEG quality of the camera frame to send. */
 export interface PerceptionFrameSpec {
@@ -56,10 +63,12 @@ export interface PerceptionCheckInfo {
  * The one badge shown next to a check's name: how it is driven, folded together
  * with what it needs ("카메라 폴링" rather than "카메라 필요" + "3초 폴링" —
  * the interval is deliberately not shown). Turn-driven checks read
- * "말할 때마다".
+ * "말할 때마다", timer-driven ones "시간 측정" (again without the duration).
  */
 export function checkBadge(check: PerceptionCheckInfo): string {
-  if (check.trigger.kind === "turn") return "말할 때마다";
+  const t = check.trigger;
+  if (t.kind === "turn") return "말할 때마다";
+  if (t.kind === "idle") return "시간 측정";
   return check.requires.includes("camera") ? "카메라 폴링" : "폴링";
 }
 
@@ -97,6 +106,8 @@ function isCheck(value: unknown): value is PerceptionCheckInfo {
       return false;
   } else if (t.kind === "turn") {
     if (t.input !== "voice") return false;
+  } else if (t.kind === "idle") {
+    if (typeof t.afterMs !== "number" || t.afterMs <= 0) return false;
   } else {
     return false;
   }
@@ -132,17 +143,24 @@ export async function fetchPerceptionChecks(): Promise<PerceptionCheckInfo[]> {
  */
 const PERCEPTION_TIMEOUT_MS = 8000;
 
-/** Run one check against a frame. null when the tick produced no verdict. */
+/**
+ * Run one check — against a frame for camera checks, with nothing for the idle
+ * timer (its verdict is just the server's wording). null when the tick
+ * produced no verdict.
+ */
 export async function runPerceptionCheck(
   name: string,
-  frame: Blob,
+  frame?: Blob,
 ): Promise<PerceptionVerdict | null> {
   try {
-    const fd = new FormData();
-    fd.append("image", frame, "frame.jpg");
+    let body: FormData | undefined;
+    if (frame) {
+      body = new FormData();
+      body.append("image", frame, "frame.jpg");
+    }
     const res = await fetch(`/api/perception/${encodeURIComponent(name)}`, {
       method: "POST",
-      body: fd,
+      body,
       signal: AbortSignal.timeout(PERCEPTION_TIMEOUT_MS),
     });
     if (!res.ok) return null;

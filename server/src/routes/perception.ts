@@ -4,6 +4,7 @@ import multer from "multer";
 import type { AiProvider } from "../ai/index.ts";
 import {
   isCameraCheck,
+  isIdleCheck,
   runPerceptionCheck,
   type PerceptionCheck,
   type PerceptionCheckInfo,
@@ -19,9 +20,10 @@ interface Deps {
 const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
 
 /**
- * Perception checks: `GET` advertises what the client should poll while the
- * camera is on (plus the label/description its 상황 인지 on/off modal shows),
- * `POST` runs one check against a frame. Both are generic over the check
+ * Perception checks: `GET` advertises what the client should run (plus the
+ * label/description its 상황 인지 on/off modal shows), `POST` runs one check —
+ * against a frame for camera checks, or with nothing at all for the idle
+ * timer, whose verdict is just its wording. Both are generic over the check
  * registry (`server/src/perception`), so adding a check needs no change here
  * or in the browser.
  */
@@ -51,6 +53,12 @@ export function createPerceptionRouter(deps: Deps): Router {
       res
         .status(404)
         .json({ error: `unknown perception check: ${req.params.name}` });
+      return;
+    }
+    if (isIdleCheck(check)) {
+      // Timer-driven: the browser kept the clock; all it needs is the wording.
+      console.log(`[hola] perception ${check.name} -> idle`);
+      res.json({ label: "idle", signal: check.signal });
       return;
     }
     if (!isCameraCheck(check)) {

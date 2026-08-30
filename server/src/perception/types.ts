@@ -39,10 +39,22 @@ export interface TurnTrigger {
 }
 
 /**
- * How the browser drives a check. A tagged shape so the client can tell a
- * polled camera check from a turn-driven one without knowing either by name.
+ * Timer-driven: the browser keeps the clock and fires once the user has gone
+ * `afterMs` without responding — no turn sent, nothing typed — after the
+ * avatar's last turn (time the avatar spends talking doesn't count). Needs no
+ * sensor and no model call.
  */
-export type PerceptionTrigger = PollTrigger | TurnTrigger;
+export interface IdleTrigger {
+  kind: "idle";
+  afterMs: number;
+}
+
+/**
+ * How the browser drives a check. A tagged shape so the client can tell a
+ * polled camera check, a turn-driven one and a timer-driven one apart without
+ * knowing any of them by name.
+ */
+export type PerceptionTrigger = PollTrigger | TurnTrigger | IdleTrigger;
 
 /** Long edge (px) / JPEG quality of the camera frame the client should send. */
 export interface PerceptionFrameSpec {
@@ -144,7 +156,18 @@ export interface VoiceCheck extends PerceptionCheckBase {
   analyze(input: VoiceAnalysisInput, sessionKey: string): PerceptionVerdict;
 }
 
-export type PerceptionCheck = CameraCheck | VoiceCheck;
+/**
+ * An idle check: fires from the browser's clock alone, so the server's part is
+ * just the wording — the signal it hands back from `POST /api/perception/:name`
+ * (called with no image) and the guidance for it.
+ */
+export interface IdleCheck extends PerceptionCheckBase {
+  trigger: IdleTrigger;
+  /** The status line injected when the user has gone quiet. */
+  signal: string;
+}
+
+export type PerceptionCheck = CameraCheck | VoiceCheck | IdleCheck;
 
 export function isCameraCheck(check: PerceptionCheck): check is CameraCheck {
   return check.trigger.kind === "poll";
@@ -152,6 +175,10 @@ export function isCameraCheck(check: PerceptionCheck): check is CameraCheck {
 
 export function isVoiceCheck(check: PerceptionCheck): check is VoiceCheck {
   return check.trigger.kind === "turn";
+}
+
+export function isIdleCheck(check: PerceptionCheck): check is IdleCheck {
+  return check.trigger.kind === "idle";
 }
 
 /**

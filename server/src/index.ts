@@ -111,7 +111,9 @@ app.listen(config.port, () => {
       .map((c) =>
         c.trigger.kind === "poll"
           ? `${c.name}@${c.trigger.intervalMs}ms`
-          : `${c.name}@${c.trigger.input}-turn`,
+          : c.trigger.kind === "turn"
+            ? `${c.name}@${c.trigger.input}-turn`
+            : `${c.name}@idle>${c.trigger.afterMs}ms`,
       )
       .join(", ")}]`,
   );

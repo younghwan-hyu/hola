@@ -1,6 +1,7 @@
 import type { AiProvider } from "../ai/index.ts";
 import { createAttentionCheck } from "./attention.ts";
 import { createExpressionCheck } from "./expression.ts";
+import { createIdleCheck } from "./idle.ts";
 import { createPresenceCheck } from "./presence.ts";
 import { createVoiceCheck } from "./voice.ts";
 import type {
@@ -11,7 +12,8 @@ import type {
 } from "./types.ts";
 
 /**
- * The perception checks the browser polls while the camera is on.
+ * The perception checks the browser runs: camera checks polled while the
+ * camera is on, the voice check on every spoken turn, the idle timer always.
  *
  * To add one: write `./<name>.ts` exporting a factory that returns a
  * {@link PerceptionCheck}, then list it here. Nothing else needs to change —
@@ -30,6 +32,7 @@ export function createPerceptionChecks(): PerceptionCheck[] {
     createAttentionCheck(),
     createExpressionCheck(),
     createVoiceCheck(),
+    createIdleCheck(),
   ];
 }
 
@@ -101,9 +104,10 @@ export async function runPerceptionCheck(
   return signal ? { label, signal } : { label };
 }
 
-export { isCameraCheck, isVoiceCheck } from "./types.ts";
+export { isCameraCheck, isIdleCheck, isVoiceCheck } from "./types.ts";
 export type {
   CameraCheck,
+  IdleCheck,
   PerceptionCheck,
   PerceptionCheckInfo,
   PerceptionInput,

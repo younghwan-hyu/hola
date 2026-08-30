@@ -54,6 +54,7 @@ import {
   fetchPerceptionChecks,
   runPerceptionCheck,
   type PerceptionCheckInfo,
+  type PerceptionVerdict,
 } from "@/lib/perception";
 import { analyzeVoice } from "@/lib/voice";
 import { GESTURES, isAvatarGesture, type AvatarGesture } from "@/lib/gestures";
@@ -208,8 +209,9 @@ export default function App() {
    *
    * Only a real user turn re-arms it (see `send`) — merely reappearing on
    * camera does not, or stepping in and out of frame without saying anything
-   * would have the avatar asking over and over. Also cleared while the camera
-   * is off, so a verdict still in flight can't nudge after the preview is gone.
+   * would have the avatar asking over and over. It is NOT tied to the camera:
+   * the idle timer runs without one, and a camera verdict that lands after the
+   * camera went off bails on the requirement re-check in the tick instead.
    */
   const perceptionArmed = useRef(true);
   /** Per-check debounce state: how many equal verdicts in a row (`consecutive`). */
@@ -229,6 +231,16 @@ export default function App() {
    */
   const perceptionDisabledRef = useRef(perceptionDisabled);
   perceptionDisabledRef.current = perceptionDisabled;
+  /** Same for `requirementMet`: re-checked once a verdict lands. */
+  const requirementMetRef = useRef(requirementMet);
+  requirementMetRef.current = requirementMet;
+  /**
+   * When the user last did something the idle check counts as a response —
+   * a turn ending (theirs, or the avatar's reply to it), typing in the input,
+   * or the avatar still talking (nobody answers over it). The idle timer
+   * measures from here; a turn re-arming perception also restarts it.
+   */
+  const lastActivityRef = useRef(Date.now());
   // aiId of a turn whose voice the user stopped, so late-arriving tts_chunks
   // don't reappend audio or resurrect its stop button.
   const stoppedTurnRef = useRef<string | null>(null);
@@ -520,6 +532,7 @@ export default function App() {
     turnInFlight.current = false;
     setBusy(false);
     closeSseRef.current = null;
+    lastActivityRef.current = Date.now();
   };
 
   /**
@@ -744,30 +757,44 @@ export default function App() {
     ((check: PerceptionCheckInfo) => Promise<void>) | null
   >(null);
   perceptionTickRef.current = async (check) => {
-    // Only polled (camera) checks tick; voice checks run inside send().
+    // Camera checks and the idle timer tick; voice checks run inside send().
     const trigger = check.trigger;
-    if (trigger.kind !== "poll") return;
-    // Never poll while a turn is in flight (the avatar is mid-sentence) or the
+    if (trigger.kind === "turn") return;
+    // Never act while a turn is in flight (the avatar is mid-sentence) or the
     // tab is hidden: both would waste calls, and a nudge must not interleave
     // with the user's own turn. Disarmed means some check already spoke and is
     // waiting on the user, so skip the call entirely rather than paying for a
     // verdict nothing may act on.
     if (turnInFlight.current || document.hidden || !perceptionArmed.current)
       return;
+    if (trigger.kind === "idle") {
+      // The avatar still talking counts as activity — nobody answers over it.
+      if (playerRef.current.isPlaying()) {
+        lastActivityRef.current = Date.now();
+        return;
+      }
+      if (Date.now() - lastActivityRef.current < trigger.afterMs) return;
+    }
     // This check's previous request is still pending — skip this tick. Other
-    // checks are unaffected: each polls on its own timer.
+    // checks are unaffected: each ticks on its own timer.
     if (perceptionInFlight.current.has(check.name)) return;
     perceptionInFlight.current.add(check.name);
     try {
-      // Every check today is camera-fed (activeChecks only holds checks whose
-      // requirements are met, so the camera is on here): capture at its spec.
-      if (!check.frame) return;
-      const frame = await captureFrame(
-        check.frame.maxPx,
-        check.frame.quality,
-      ).catch(() => null);
-      if (!frame) return;
-      const verdict = await runPerceptionCheck(check.name, frame);
+      let verdict: PerceptionVerdict | null;
+      if (trigger.kind === "poll") {
+        // Camera-fed (activeChecks only holds checks whose requirements are
+        // met, so the camera is on here): capture at the check's spec.
+        if (!check.frame) return;
+        const frame = await captureFrame(
+          check.frame.maxPx,
+          check.frame.quality,
+        ).catch(() => null);
+        if (!frame) return;
+        verdict = await runPerceptionCheck(check.name, frame);
+      } else {
+        // Idle: nothing to send — the server just hands back the wording.
+        verdict = await runPerceptionCheck(check.name);
+      }
       // Re-check: a turn may have started, another check may have spoken, the
       // camera may have gone off, or this check may have been switched off in
       // the 상황 인지 modal while the request was in flight.
@@ -775,14 +802,16 @@ export default function App() {
         !verdict ||
         turnInFlight.current ||
         !perceptionArmed.current ||
-        perceptionDisabledRef.current.has(check.name)
+        perceptionDisabledRef.current.has(check.name) ||
+        !check.requires.every(requirementMetRef.current)
       )
         return;
 
       const prev = perceptionState.current.get(check.name);
       const count = prev?.label === verdict.label ? prev.count + 1 : 1;
       perceptionState.current.set(check.name, { label: verdict.label, count });
-      if (verdict.signal && count >= trigger.consecutive) {
+      const needed = trigger.kind === "poll" ? trigger.consecutive : 1;
+      if (verdict.signal && count >= needed) {
         // Disarm synchronously, before send() yields. Other checks may still
         // have requests in flight, but each verdict lands in its own event-loop
         // task and hits the re-check above, so only this one nudge goes out.
@@ -794,17 +823,18 @@ export default function App() {
     }
   };
 
-  // Arm perception with the camera. Kept apart from the timers below so that
-  // switching a check on or off (which restarts the timers) doesn't re-arm a
-  // nudge that's already out and waiting on the user's answer.
+  // Turning the camera on starts a fresh episode: re-arm and reset the
+  // debounce counts. Kept apart from the timers below so that switching a
+  // check on or off (which restarts the timers) doesn't re-arm a nudge that's
+  // already out and waiting on the user's answer. Turning the camera off only
+  // clears the counts — the arm stays as it is, since checks that need no
+  // camera (the idle timer) keep running; a camera verdict still in flight
+  // bails on the requirement re-check in the tick.
   useEffect(() => {
     if (!cameraOn) return;
     perceptionArmed.current = true;
     perceptionState.current.clear();
     return () => {
-      // Start clean next time the camera comes on — and stay disarmed until
-      // then, so a verdict still in flight can't nudge with the camera off.
-      perceptionArmed.current = false;
       perceptionState.current.clear();
     };
   }, [cameraOn]);
@@ -818,16 +848,24 @@ export default function App() {
   // only tick ever skipped is one whose own previous request is still pending
   // (see perceptionInFlight), so a slow check can't hold up a fast one.
   useEffect(() => {
-    // Only polled (camera) checks get a timer; voice checks run per turn.
-    const timers = activeChecks.flatMap((check) =>
-      check.trigger.kind === "poll"
-        ? [
+    // Camera checks tick at their interval; the idle timer looks at its clock
+    // a few times a minute; voice checks run per turn and get no timer.
+    const timers = activeChecks.flatMap((check) => {
+      const t = check.trigger;
+      const intervalMs =
+        t.kind === "poll"
+          ? t.intervalMs
+          : t.kind === "idle"
+            ? Math.min(5000, Math.max(1000, t.afterMs / 6))
+            : null;
+      return intervalMs === null
+        ? []
+        : [
             window.setInterval(() => {
               void perceptionTickRef.current?.(check);
-            }, check.trigger.intervalMs),
-          ]
-        : [],
-    );
+            }, intervalMs),
+          ];
+    });
     if (timers.length === 0) return;
     return () => {
       for (const t of timers) window.clearInterval(t);
@@ -842,8 +880,11 @@ export default function App() {
     if (!next.delete(name)) next.add(name);
     setPerceptionDisabled(next);
     storeDisabledPerception(next);
-    // Drop its debounce count so switching it back on starts from a clean slate.
+    // Drop its debounce count so switching it back on starts from a clean
+    // slate — and restart the idle clock, so a timer check switched on doesn't
+    // fire the moment the modal closes.
     perceptionState.current.delete(name);
+    lastActivityRef.current = Date.now();
   };
 
   const onSubmit = (e: FormEvent) => {
@@ -1079,7 +1120,10 @@ export default function App() {
         </Button>
         <Textarea
           value={input}
-          onChange={(e) => setInput(e.target.value)}
+          onChange={(e) => {
+            setInput(e.target.value);
+            lastActivityRef.current = Date.now(); // typing counts as responding
+          }}
           onKeyDown={onKeyDown}
           placeholder="메시지를 입력하거나 마이크 버튼을 누르세요"
           disabled={busy}
