@@ -176,12 +176,13 @@ export function createVoiceCheck(): VoiceCheck {
 
   return {
     name: "voice",
-    label: "응답 목소리",
-    description:
-      "말한 목소리가 평소보다 느리고 머뭇거리면 답을 더 쉽고 짧게, 낮고 단조로우면 짧게 답하며 컨디션을 살핍니다. 처음 두 번은 평소 목소리를 익히기만 합니다.",
+    label: "목소리 톤 인식",
+    description: "목소리가 평소보다 느리거나 낮은지 확인합니다.",
     // Nothing optional to switch on: speaking is how the app is used.
     requires: [],
     trigger: { kind: "turn", input: "voice" },
+    // Judged against this user's baseline, not a fixed threshold (see above).
+    relative: true,
     labelText: LABEL_TEXT,
     // Attached to the user's own message, so the rule is about HOW to answer
     // that message — never about the notice itself.

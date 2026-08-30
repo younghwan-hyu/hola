@@ -39,6 +39,7 @@ export function createPerceptionRouter(deps: Deps): Router {
       description: check.description,
       requires: check.requires,
       trigger: check.trigger,
+      ...(check.relative ? { relative: true } : {}),
       ...(check.frame ? { frame: check.frame } : {}),
     }));
     res.json(info);

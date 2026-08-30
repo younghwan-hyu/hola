@@ -47,10 +47,9 @@ import {
   storeAvatar,
 } from "@/lib/avatars";
 import {
+  checkBadge,
   fetchPerceptionChecks,
-  requirementLabel,
   runPerceptionCheck,
-  triggerLabel,
   type PerceptionCheckInfo,
 } from "@/lib/perception";
 import { analyzeVoice } from "@/lib/voice";
@@ -79,21 +78,6 @@ interface Bubble {
 }
 
 const newId = () => Math.random().toString(36).slice(2, 10);
-
-/**
- * What one perception check is doing right now, as shown in the 상황 인지
- * modal. Precedence: switched off > a requirement (camera) missing > a nudge
- * already out and waiting on the user > running.
- */
-type CheckStatus = "off" | "blocked" | "waiting" | "running";
-
-const CHECK_STATUS_DOT: Record<CheckStatus, string> = {
-  running: "bg-emerald-400",
-  waiting: "bg-amber-400",
-  blocked: "bg-amber-400",
-  off: "bg-white/25",
-};
-
 
 const MAX_BUBBLES = 2; // bubbles the inline mode shows at once
 const EXIT_MS = 350; // how long a bubble that left the inline window animates out
@@ -149,8 +133,9 @@ export default function App() {
   const [uploading, setUploading] = useState(false);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
   // 문서 조회 모드: when on, a PDF viewer pane shows left of the avatar and
-  // each sent turn attaches a capture of the page being viewed.
-  const [docMode, setDocMode] = useState(false);
+  // each sent turn attaches a capture of the page being viewed. On by default
+  // (this deployment is a lecture TA, so the doc pane is the normal layout).
+  const [docMode, setDocMode] = useState(true);
   // Camera: when on, a live preview shows and each sent turn attaches a frame.
   const [cameraOn, setCameraOn] = useState(false);
   const [facingMode, setFacingMode] = useState<"user" | "environment">("user");
@@ -174,20 +159,6 @@ export default function App() {
   );
   const [perceptionOpen, setPerceptionOpen] = useState(false);
   /**
-   * True from the moment a check makes the avatar speak until the user answers
-   * (or the camera is toggled). The render-side mirror of `perceptionArmed`
-   * below: the ref is what the polling logic reads, this is what the modal
-   * shows ("말을 걸고 응답 대기 중").
-   */
-  const [nudgeOut, setNudgeOut] = useState(false);
-  /**
-   * Latest verdict per voice check, from the `perception` SSE event of the
-   * last spoken turn — shown in the modal ("직전 응답: 느리고 머뭇거림").
-   */
-  const [perceptionVerdicts, setPerceptionVerdicts] = useState<
-    Record<string, { label: string; text: string }>
-  >({});
-  /**
    * Whether the browser currently satisfies one of a check's `requires`. The
    * camera is the only requirement today (voice checks have none — speaking is
    * the app's own input); anything the server may add later is unmet here, so
@@ -205,21 +176,6 @@ export default function App() {
     // requirementMet is a closure over cameraOn, hence the dep.
     [perceptionChecks, perceptionDisabled, cameraOn],
   );
-  // True exactly when something is being polled right now (a camera check on
-  // with the camera on). Drives the 상황 인지 button's highlight. Voice checks
-  // don't count: they only act when the user speaks, so there is nothing
-  // "running" to show between turns.
-  const perceptionLive = activeChecks.some((c) => c.trigger.kind === "poll");
-  /** What the modal shows for a check — see {@link CheckStatus}. */
-  const checkStatus = (check: PerceptionCheckInfo): CheckStatus =>
-    perceptionDisabled.has(check.name)
-      ? "off"
-      : !check.requires.every(requirementMet)
-        ? "blocked"
-        : nudgeOut && check.trigger.kind === "poll"
-          ? "waiting"
-          : "running";
-
   const playerRef = useRef<StreamingPcmPlayer>(new StreamingPcmPlayer());
   /**
    * A turn is starting or streaming. `busy` state drives the UI, but state is
@@ -582,7 +538,6 @@ export default function App() {
     // the avatar waits for an answer rather than asking again.
     if (!payload.hidden) {
       perceptionArmed.current = true;
-      setNudgeOut(false);
       perceptionState.current.clear();
     }
     setBusy(true);
@@ -724,10 +679,8 @@ export default function App() {
               if (isAvatarGesture(ev.name)) avatarRef.current?.playGesture(ev.name);
               return;
             case "perception":
-              setPerceptionVerdicts((prev) => ({
-                ...prev,
-                [ev.check]: { label: ev.label, text: ev.text },
-              }));
+              // A voice check's verdict on the spoken turn. Not surfaced in
+              // the UI — the server has already folded it into the turn.
               return;
             case "ai_delta":
               onAiText(ev.text, true);
@@ -819,7 +772,6 @@ export default function App() {
         // have requests in flight, but each verdict lands in its own event-loop
         // task and hits the re-check above, so only this one nudge goes out.
         perceptionArmed.current = false;
-        setNudgeOut(true);
         void send({ text: verdict.signal, hidden: true });
       }
     } finally {
@@ -833,13 +785,11 @@ export default function App() {
   useEffect(() => {
     if (!cameraOn) return;
     perceptionArmed.current = true;
-    setNudgeOut(false);
     perceptionState.current.clear();
     return () => {
       // Start clean next time the camera comes on — and stay disarmed until
       // then, so a verdict still in flight can't nudge with the camera off.
       perceptionArmed.current = false;
-      setNudgeOut(false);
       perceptionState.current.clear();
     };
   }, [cameraOn]);
@@ -1015,12 +965,12 @@ export default function App() {
     );
   };
 
-  // Voice-first input. Collapsed: doc viewer + mic + camera + file upload +
-  // perception + "..." in a row; "..." reveals the full bar (text input +
-  // settings + avatar + gesture + mic + send). It floats over the 3D view in
-  // inline mode and sits under the log as a normal row in separate mode, so
-  // only the positioning classes differ. On phone widths the buttons shrink and
-  // pack tighter so all six still fit one row (a second row would sit under the
+  // Voice-first input. Collapsed: doc viewer + camera + mic + perception +
+  // "..." in a row; "..." reveals the full bar (text input + settings + avatar +
+  // gesture + file upload + mic + send). It floats over the 3D view in inline
+  // mode and sits under the log as a normal row in separate mode, so only the
+  // positioning classes differ. On phone widths the buttons shrink and pack
+  // tighter so all five still fit one row (a second row would sit under the
   // inline bubbles); flex-wrap is only a safety net for even narrower screens.
   const floatingInput = bubbleMode === "inline";
   const inputBar = !expanded ? (
@@ -1031,17 +981,7 @@ export default function App() {
           : "shrink-0 border-t border-white/10 bg-black/20 py-4"
       }`}
     >
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept=".txt,.md,.markdown,text/plain,text/markdown"
-        className="hidden"
-        onChange={(e) => {
-          void onFilePicked(e.target.files?.[0]);
-          e.target.value = "";
-        }}
-      />
-      {/* Order: 문서(doc viewer) - 음성(mic) - 카메라(camera) - 파일(upload) - 상황 인지(perception) - ...(more). */}
+      {/* Order: 문서(doc viewer) - 카메라(camera) - 음성(mic) - 상황 인지(perception) - ...(more). */}
       <Button
         type="button"
         variant="ghost"
@@ -1056,11 +996,6 @@ export default function App() {
       >
         <BookOpen className="h-6 w-6" />
       </Button>
-      <Recorder
-        size="lg"
-        disabled={busy}
-        onCaptured={(blob) => void send({ audio: blob })}
-      />
       <Button
         type="button"
         variant="ghost"
@@ -1075,33 +1010,20 @@ export default function App() {
       >
         <Camera className="h-6 w-6" />
       </Button>
+      <Recorder
+        size="lg"
+        disabled={busy}
+        onCaptured={(blob) => void send({ audio: blob })}
+      />
+      {/* 상황 인지: opens the per-check on/off modal. Unlike the camera/doc
+          buttons it is never highlighted — it opens a settings modal rather
+          than toggling a mode, and the running state is shown in the modal. */}
       <Button
         type="button"
         variant="ghost"
         size="icon"
-        disabled={uploading}
-        title="문서 업로드"
+        title="상황 인지"
         className="h-14 w-14 shrink-0 rounded-full sm:h-16 sm:w-16 border border-white/15 bg-black/40 text-white shadow-lg shadow-black/30 backdrop-blur hover:bg-black/55 hover:text-white"
-        onClick={() => fileInputRef.current?.click()}
-      >
-        {uploading ? (
-          <Loader2 className="h-6 w-6 animate-spin" />
-        ) : (
-          <FileUp className="h-6 w-6" />
-        )}
-      </Button>
-      {/* 상황 인지: opens the per-check on/off modal. Highlighted (like the
-          camera/doc buttons) only while perception is actually running. */}
-      <Button
-        type="button"
-        variant="ghost"
-        size="icon"
-        title={perceptionLive ? "상황 인지 (동작 중)" : "상황 인지"}
-        className={
-          perceptionLive
-            ? "h-14 w-14 shrink-0 rounded-full sm:h-16 sm:w-16 bg-white text-black shadow-lg shadow-black/30 hover:bg-white/90 hover:text-black"
-            : "h-14 w-14 shrink-0 rounded-full sm:h-16 sm:w-16 border border-white/15 bg-black/40 text-white shadow-lg shadow-black/30 backdrop-blur hover:bg-black/55 hover:text-white"
-        }
         onClick={() => setPerceptionOpen(true)}
       >
         <ScanFace className="h-6 w-6" />
@@ -1172,6 +1094,31 @@ export default function App() {
         >
           <Smile className="h-4 w-4" />
         </Button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".txt,.md,.markdown,text/plain,text/markdown"
+          className="hidden"
+          onChange={(e) => {
+            void onFilePicked(e.target.files?.[0]);
+            e.target.value = "";
+          }}
+        />
+        <Button
+          type="button"
+          variant="outline"
+          size="icon"
+          disabled={uploading}
+          title="문서 업로드"
+          className="h-11 w-11 shrink-0"
+          onClick={() => fileInputRef.current?.click()}
+        >
+          {uploading ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <FileUp className="h-4 w-4" />
+          )}
+        </Button>
         <Recorder
           disabled={busy}
           onCaptured={(blob) => void send({ audio: blob })}
@@ -1207,8 +1154,9 @@ export default function App() {
 
       {/* Chat column — the whole viewport normally, the right pane in doc mode.
           A column so 분리 모드 can stack [3D | log | input]; in 인라인 모드 the
-          3D area is the only row and everything floats over it. The modals hang
-          off this element, so they cover the column in both modes. */}
+          3D area is the only row and everything floats over it. The modals are
+          rendered here but positioned `fixed`, so they cover the whole viewport
+          (doc pane included) rather than just this column. */}
       <div className="relative flex h-full min-w-0 flex-[2] flex-col overflow-hidden">
         {/* Avatar area — the 3D view and everything that floats over it. */}
         <div className="relative min-h-0 flex-1 overflow-hidden bg-[radial-gradient(ellipse_at_center,_hsl(222_47%_13%)_0%,_hsl(222_84%_5%)_70%)]">
@@ -1363,7 +1311,7 @@ export default function App() {
         {/* Avatar picker modal — renders public/avatars.json (lib/avatars.ts) */}
         {avatarOpen && (
           <div
-            className="absolute inset-0 z-10 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm"
+            className="fixed inset-0 z-10 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm"
             onClick={() => setAvatarOpen(false)}
           >
             <div
@@ -1406,7 +1354,7 @@ export default function App() {
         {/* Settings modal — local UI preferences (lib/settings.ts) */}
         {settingsOpen && (
           <div
-            className="absolute inset-0 z-10 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm"
+            className="fixed inset-0 z-10 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm"
             onClick={() => setSettingsOpen(false)}
           >
             <div
@@ -1457,7 +1405,7 @@ export default function App() {
         {/* Gesture modal */}
         {gestureOpen && (
           <div
-            className="absolute inset-0 z-10 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm"
+            className="fixed inset-0 z-10 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm"
             onClick={() => setGestureOpen(false)}
           >
             <div
@@ -1491,18 +1439,17 @@ export default function App() {
         )}
 
         {/* 상황 인지 modal — per-check on/off for the perception checks. The
-            list, wording, requirement badges and trigger badges all come from
-            GET /api/perception; the status line under each check reflects the
-            switch, the camera and whether a nudge is out (see CheckStatus).
-            Deliberately no summary and no camera control here — the camera is
-            operated from the main row, and each item states its own status. */}
+            list, wording and the badge all come from GET /api/perception.
+            Deliberately no summary, no status line and no camera control here —
+            the camera is operated from the main row; the only live cue is the
+            badge turning amber while a check waits on the camera. */}
         {perceptionOpen && (
           <div
-            className="absolute inset-0 z-10 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm"
+            className="fixed inset-0 z-10 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm"
             onClick={() => setPerceptionOpen(false)}
           >
             <div
-              className="relative w-full max-w-xs rounded-2xl border border-white/10 bg-zinc-900/95 p-5 shadow-2xl"
+              className="relative w-full max-w-md rounded-2xl border border-white/10 bg-zinc-900/95 p-6 shadow-2xl"
               onClick={(e) => e.stopPropagation()}
             >
               <button
@@ -1512,76 +1459,56 @@ export default function App() {
               >
                 <X className="h-5 w-5" />
               </button>
-              <h2 className="mb-4 text-base font-semibold text-white">상황 인지</h2>
+              <h2 className="mb-5 text-lg font-semibold text-white">상황 인지</h2>
               {perceptionChecks.length === 0 && (
                 <p className="text-xs text-white/50">
                   서버에 등록된 상황 인지 항목이 없습니다.
                 </p>
               )}
-              <div className="flex flex-col gap-2">
+              <div className="flex flex-col gap-3">
                 {perceptionChecks.map((check) => {
                   const enabled = !perceptionDisabled.has(check.name);
-                  const status = checkStatus(check);
-                  const missing = check.requires.filter(
-                    (r) => !requirementMet(r),
-                  );
-                  const verdict = perceptionVerdicts[check.name];
-                  const statusText =
-                    status === "off"
-                      ? "꺼짐"
-                      : status === "blocked"
-                        ? missing.every((r) => r === "camera")
-                          ? "카메라를 켜면 동작"
-                          : "이 브라우저에서는 사용할 수 없음"
-                        : check.trigger.kind === "turn"
-                          ? `음성으로 말하면 분석${
-                              verdict ? ` · 직전 응답: ${verdict.text}` : ""
-                            }`
-                          : status === "waiting"
-                            ? "말을 걸고 응답 대기 중"
-                            : "동작 중";
+                  // Switched on but something it needs (the camera) is off.
+                  const blocked =
+                    enabled && !check.requires.every(requirementMet);
                   const badge =
-                    "rounded-full border px-1.5 py-0.5 text-[10px] leading-none";
+                    "rounded-full border px-2 py-1 text-xs leading-none";
                   return (
                     <div
                       key={check.name}
-                      className="flex items-center gap-3 rounded-lg border border-white/10 bg-white/5 px-3 py-2.5"
+                      className="flex items-center gap-4 rounded-xl border border-white/10 bg-white/5 px-4 py-4"
                     >
                       <div
-                        className={`min-w-0 flex-1 ${status === "off" ? "opacity-60" : ""}`}
+                        className={`min-w-0 flex-1 ${enabled ? "" : "opacity-60"}`}
                       >
-                        <div className="flex flex-wrap items-center gap-1.5">
-                          <p className="text-sm font-medium text-white">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="text-base font-medium text-white">
                             {check.label}
                           </p>
-                          {/* Requirement badges: amber while the check is on
-                              but that requirement is what's holding it back. */}
-                          {check.requires.map((r) => (
-                            <span
-                              key={r}
-                              className={`${badge} ${
-                                status === "blocked" && !requirementMet(r)
-                                  ? "border-amber-400/40 bg-amber-400/15 text-amber-200"
-                                  : "border-white/15 bg-white/10 text-white/70"
-                              }`}
-                            >
-                              {requirementLabel(r)}
-                            </span>
-                          ))}
+                          {/* Driver badge ("카메라 폴링" / "말할 때마다"): blue,
+                              or amber while the check is on but something it
+                              needs (the camera) is what's holding it back. */}
                           <span
-                            className={`${badge} border-white/15 bg-white/10 text-white/70`}
+                            className={`${badge} ${
+                              blocked
+                                ? "border-amber-400/40 bg-amber-400/15 text-amber-200"
+                                : "border-sky-400/40 bg-sky-400/15 text-sky-200"
+                            }`}
                           >
-                            {triggerLabel(check.trigger)}
+                            {checkBadge(check)}
                           </span>
+                          {/* Judged against the user's own baseline, not an
+                              absolute rule (server `relative`). Grey. */}
+                          {check.relative && (
+                            <span
+                              className={`${badge} border-white/15 bg-white/10 text-white/70`}
+                            >
+                              상대적 측정
+                            </span>
+                          )}
                         </div>
-                        <p className="mt-1 text-xs leading-snug text-white/50">
+                        <p className="mt-1.5 text-sm leading-snug text-white/50">
                           {check.description}
-                        </p>
-                        <p className="mt-1.5 flex items-center gap-1.5 text-[10px] text-white/45">
-                          <span
-                            className={`inline-block h-1.5 w-1.5 rounded-full ${CHECK_STATUS_DOT[status]}`}
-                          />
-                          {statusText}
                         </p>
                       </div>
                       <button
@@ -1590,12 +1517,12 @@ export default function App() {
                         aria-checked={enabled}
                         aria-label={`${check.label} ${enabled ? "끄기" : "켜기"}`}
                         onClick={() => togglePerception(check.name)}
-                        className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${
+                        className={`relative h-7 w-12 shrink-0 rounded-full transition-colors ${
                           enabled ? "bg-white" : "bg-white/20"
                         }`}
                       >
                         <span
-                          className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full transition-transform ${
+                          className={`absolute left-0.5 top-0.5 h-6 w-6 rounded-full transition-transform ${
                             enabled
                               ? "translate-x-5 bg-black"
                               : "translate-x-0 bg-white/70"

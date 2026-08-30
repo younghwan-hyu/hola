@@ -17,7 +17,7 @@ export function createPresenceCheck(): PerceptionCheck {
   return {
     name: "presence",
     label: "존재 인식",
-    description: "얼굴이 카메라에서 사라지면 어디 갔는지 묻습니다.",
+    description: "얼굴이 카메라에 비치는지 확인합니다.",
     requires: ["camera"],
     trigger: {
       kind: "poll",

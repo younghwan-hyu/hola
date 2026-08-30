@@ -21,8 +21,7 @@ export function createExpressionCheck(): PerceptionCheck {
   return {
     name: "expression",
     label: "표정 인식",
-    description:
-      "표정이 어둡거나 아리송해 보이면 이해가 잘 안 되는지, 어려운지 묻습니다. 잠깐 스치는 표정은 넘기고 10초쯤 이어질 때만 묻습니다.",
+    description: "표정이 어둡거나 아리송한지 확인합니다.",
     requires: ["camera"],
     trigger: {
       kind: "poll",

@@ -74,6 +74,13 @@ export interface PerceptionCheckInfo {
   requires: readonly PerceptionRequirement[];
   /** How the check is driven (and, for polling, how often). Shown as a badge. */
   trigger: PerceptionTrigger;
+  /**
+   * The check judges against the user's OWN usual (a per-session baseline it
+   * builds as it goes) rather than an absolute rule. Shown as a "상대적 측정"
+   * badge in the modal. Omitted (false) for the camera checks, which classify
+   * each frame on its own.
+   */
+  relative?: boolean;
   /** Camera capture spec; present exactly when `requires` includes "camera". */
   frame?: PerceptionFrameSpec;
 }

@@ -43,31 +43,24 @@ export interface PerceptionCheckInfo {
    */
   requires: string[];
   trigger: PerceptionTrigger;
+  /**
+   * Set when the check compares against the user's own baseline instead of an
+   * absolute rule — shown as an extra "상대적 측정" badge.
+   */
+  relative?: boolean;
   /** Present for camera checks: how to capture the frame that is sent. */
   frame?: PerceptionFrameSpec;
 }
 
-/** Badge text for a requirement. Unknown ones fall back to the raw name. */
-export function requirementLabel(requirement: string): string {
-  switch (requirement) {
-    case "camera":
-      return "카메라 필요";
-    default:
-      return `${requirement} 필요`;
-  }
-}
-
-/** "3" for 3000ms, "2.5" for 2500ms. */
-const formatSeconds = (ms: number): string => {
-  const s = ms / 1000;
-  return Number.isInteger(s) ? String(s) : s.toFixed(1);
-};
-
-/** Badge text for how a check is driven ("3초 폴링", "말할 때마다"). */
-export function triggerLabel(trigger: PerceptionTrigger): string {
-  return trigger.kind === "poll"
-    ? `${formatSeconds(trigger.intervalMs)}초 폴링`
-    : "말할 때마다";
+/**
+ * The one badge shown next to a check's name: how it is driven, folded together
+ * with what it needs ("카메라 폴링" rather than "카메라 필요" + "3초 폴링" —
+ * the interval is deliberately not shown). Turn-driven checks read
+ * "말할 때마다".
+ */
+export function checkBadge(check: PerceptionCheckInfo): string {
+  if (check.trigger.kind === "turn") return "말할 때마다";
+  return check.requires.includes("camera") ? "카메라 폴링" : "폴링";
 }
 
 export interface PerceptionVerdict {
