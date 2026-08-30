@@ -19,7 +19,7 @@ export interface AvatarHandle {
 }
 
 interface Props {
-  /** URL of the .vrm model (default avatar lives at /girl.vrm). */
+  /** URL of the .vrm model (default avatar lives at /Sakurada_Fumiriya.vrm). */
   avatarUrl: string;
   /**
    * How far back (metres) the camera sits in the default framing; defaults to

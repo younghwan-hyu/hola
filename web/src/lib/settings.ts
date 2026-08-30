@@ -14,18 +14,18 @@ export const BUBBLE_MODES: {
   hint: string;
 }[] = [
   {
-    id: "inline",
-    label: "인라인",
-    hint: "3D 화면 위에 최근 대화만 겹쳐 보여줍니다.",
-  },
-  {
     id: "separate",
     label: "분리",
     hint: "3D 화면 아래 창에 대화가 쌓이고, 스크롤해서 다시 볼 수 있습니다.",
   },
+  {
+    id: "inline",
+    label: "인라인",
+    hint: "3D 화면 위에 최근 대화만 겹쳐 보여줍니다.",
+  },
 ];
 
-/** The stored mode, or `inline` when nothing (usable) is stored. */
+/** The stored mode, or `separate` when nothing (usable) is stored. */
 export function loadBubbleMode(): BubbleMode {
   try {
     const stored = window.localStorage.getItem(STORAGE_KEY);
@@ -33,7 +33,7 @@ export function loadBubbleMode(): BubbleMode {
   } catch {
     // storage unavailable (e.g. Safari private mode) — fall through
   }
-  return "inline";
+  return "separate";
 }
 
 export function storeBubbleMode(mode: BubbleMode): void {

@@ -2,7 +2,7 @@
  * Avatar list, resolved at RUNTIME from `public/avatars.json` — a plain array of
  * `.vrm` paths:
  *
- *   ["/girl.vrm", "/Sakurada_Fumiriya.vrm"]
+ *   ["/Sakurada_Fumiriya.vrm", "/girl.vrm"]
  *
  * The app fetches it on mount, so dropping a model in `public/` and adding its
  * path to the manifest shows up on a page refresh — no rebuild, no restart.
@@ -10,7 +10,7 @@
  */
 
 /** Shipped with the app; used when the manifest is missing or unusable. */
-const BUILTIN = "/girl.vrm";
+const BUILTIN = "/Sakurada_Fumiriya.vrm";
 
 /** Served from public/, so it honours a non-root base path like Avatar's sun.glb. */
 const MANIFEST_URL = `${import.meta.env.BASE_URL}avatars.json`;
