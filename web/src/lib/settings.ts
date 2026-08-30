@@ -44,6 +44,50 @@ export function storeBubbleMode(mode: BubbleMode): void {
   }
 }
 
+// ── 배경 (scene backdrop) ────────────────────────────────────────────────────
+
+/** Which backdrop the avatar stands in. Built in ./backgrounds.ts. */
+export type Background = "classroom" | "none";
+
+const BACKGROUND_KEY = "hola.background";
+
+export const BACKGROUNDS: {
+  id: Background;
+  label: string;
+  hint: string;
+}[] = [
+  {
+    id: "classroom",
+    label: "강의실",
+    hint: "화이트보드와 프로젝터 스크린, 긴 책상이 있는 대학 강의실입니다.",
+  },
+  {
+    id: "none",
+    label: "없음",
+    hint: "배경 없이 어두운 화면에 아바타만 보여줍니다.",
+  },
+];
+
+/** The stored backdrop, or `classroom` when nothing (usable) is stored. */
+export function loadBackground(): Background {
+  try {
+    const stored = window.localStorage.getItem(BACKGROUND_KEY);
+    const known = BACKGROUNDS.find((b) => b.id === stored);
+    if (known) return known.id;
+  } catch {
+    // storage unavailable — fall through
+  }
+  return "classroom";
+}
+
+export function storeBackground(id: Background): void {
+  try {
+    window.localStorage.setItem(BACKGROUND_KEY, id);
+  } catch {
+    // storage unavailable — the pick just won't survive a reload
+  }
+}
+
 // ── 상황 인지 (perception) on/off ───────────────────────────────────────────
 //
 // Stored as the set of check names the user switched OFF, so anything the

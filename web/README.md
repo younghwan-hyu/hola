@@ -27,6 +27,10 @@ TTS PCM 청크 ──appendPcm──▶ StreamingPcmPlayer
 - **기본 자세**: VRM은 T-포즈로 로드되므로, `setRelaxedPose`(`src/lib/vrm.ts`)가
   휴머노이드 팔 본을 회전시켜 팔을 내린 자연스러운 **서 있는 포즈**로 바꿉니다.
 - **부가 모션**: 랜덤 눈 깜빡임(`blink`), 카메라를 향한 시선(`lookAt`), 미세한 좌우 흔들림.
+- **배경**: `src/lib/classroom.ts`가 도형·캔버스 텍스처만으로 대학 강의실(화이트보드·프로젝터
+  스크린·전자교탁·긴 책상 등)을 만들고, `src/lib/backgrounds.ts`가 배경 id → 그룹 팩토리를 맡습니다. 설정 모달의 **배경**에서
+  강의실/없음을 고르면 `Avatar`의 `background` prop으로 전달되어 씬 재생성 없이 그룹만 교체됩니다
+  (선택은 `localStorage` `hola.background`).
 - **제스처**: 하단 바의 웃는 얼굴 버튼 → 모달에서 `기쁜 표정`/`슬픈 표정`/`손 흔들기`/`맑은 날씨` 선택.
   Avatar가 `forwardRef`로 노출하는 `playGesture()`를 호출하면 렌더 루프가 표정
   프리셋(`happy`/`sad`), 오른팔 본 애니메이션(손 흔들기), 또는 빛나는 해 GLB 등장

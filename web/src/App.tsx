@@ -11,10 +11,12 @@ import {
   Camera,
   Check,
   ChevronDown,
+  CircleOff,
   FileUp,
   Loader2,
   MessageSquare,
   MoreHorizontal,
+  Presentation,
   ScanFace,
   Send,
   Settings,
@@ -23,6 +25,7 @@ import {
   SwitchCamera,
   UserRound,
   X,
+  type LucideIcon,
 } from "lucide-react";
 
 import {
@@ -55,11 +58,15 @@ import {
 import { analyzeVoice } from "@/lib/voice";
 import { GESTURES, isAvatarGesture, type AvatarGesture } from "@/lib/gestures";
 import {
+  BACKGROUNDS,
   BUBBLE_MODES,
+  loadBackground,
   loadBubbleMode,
   loadDisabledPerception,
+  storeBackground,
   storeBubbleMode,
   storeDisabledPerception,
+  type Background,
   type BubbleMode,
 } from "@/lib/settings";
 import { base64ToArrayBuffer, StreamingPcmPlayer } from "@/lib/audio";
@@ -78,6 +85,12 @@ interface Bubble {
 }
 
 const newId = () => Math.random().toString(36).slice(2, 10);
+
+/** Icon shown beside each backdrop option in the settings modal. */
+const BACKGROUND_ICONS: Record<Background, LucideIcon> = {
+  classroom: Presentation,
+  none: CircleOff,
+};
 
 const MAX_BUBBLES = 2; // bubbles the inline mode shows at once
 const EXIT_MS = 350; // how long a bubble that left the inline window animates out
@@ -111,6 +124,8 @@ export default function App() {
   const [messages, setMessages] = useState<Bubble[]>([]);
   /** Inline (over the 3D view) vs separate (a scrollable log below it). */
   const [bubbleMode, setBubbleMode] = useState<BubbleMode>(loadBubbleMode);
+  // 3D backdrop behind the avatar (lib/backgrounds.ts), picked in settings.
+  const [background, setBackground] = useState<Background>(loadBackground);
   /**
    * Inline mode only: ids that just fell out of the rolling window, kept
    * mounted above it for EXIT_MS so they can animate up and away.
@@ -870,6 +885,13 @@ export default function App() {
     stickToBottom.current = true;
   };
 
+  const selectBackground = (id: Background) => {
+    setSettingsOpen(false);
+    if (id === background) return;
+    setBackground(id);
+    storeBackground(id);
+  };
+
   // Auto-scroll follows the newest message only while the log is (near) the
   // bottom — scrolling up to read back must not get yanked away mid-stream.
   const onLogScroll = () => {
@@ -1166,6 +1188,7 @@ export default function App() {
               <Avatar
                 ref={avatarRef}
                 avatarUrl={avatar}
+                background={background}
                 cameraDistance={
                   bubbleMode === "separate" ? SEPARATE_CAMERA_DISTANCE : undefined
                 }
@@ -1393,6 +1416,36 @@ export default function App() {
                       </span>
                       <span className="whitespace-normal text-left text-xs font-normal opacity-70">
                         {m.hint}
+                      </span>
+                    </Button>
+                  );
+                })}
+              </div>
+              <p className="mb-4 mt-5 text-xs font-medium text-white/50">
+                배경
+              </p>
+              <div className="flex flex-col gap-2">
+                {BACKGROUNDS.map((b) => {
+                  const selected = b.id === background;
+                  const Icon = BACKGROUND_ICONS[b.id];
+                  return (
+                    <Button
+                      key={b.id}
+                      type="button"
+                      variant={selected ? "default" : "secondary"}
+                      className="h-auto flex-col items-start gap-1 px-3 py-2.5 text-sm"
+                      onClick={() => selectBackground(b.id)}
+                    >
+                      <span className="flex items-center gap-2">
+                        {selected ? (
+                          <Check className="h-4 w-4 shrink-0" />
+                        ) : (
+                          <Icon className="h-4 w-4 shrink-0" />
+                        )}
+                        {b.label}
+                      </span>
+                      <span className="whitespace-normal text-left text-xs font-normal opacity-70">
+                        {b.hint}
                       </span>
                     </Button>
                   );

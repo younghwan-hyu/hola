@@ -4,8 +4,10 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { VRMUtils, type VRM } from "@pixiv/three-vrm";
 
+import { createBackground } from "@/lib/backgrounds";
 import { getArmDownSign, loadVrm } from "@/lib/vrm";
 import { GESTURE_DURATION, type AvatarGesture } from "@/lib/gestures";
+import type { Background } from "@/lib/settings";
 
 export type { AvatarGesture };
 
@@ -27,6 +29,11 @@ interface Props {
    * still dolly between OrbitControls' min/maxDistance afterwards.
    */
   cameraDistance?: number;
+  /**
+   * The backdrop the avatar stands in (lib/backgrounds.ts). Swapped in place
+   * when it changes — no scene rebuild, no model reload. Defaults to none.
+   */
+  background?: Background;
   /**
    * Returns the current audible loudness (RMS, ~0..0.3) of the TTS playback.
    * Read every frame to drive the mouth. Returns 0 when silent.
@@ -161,7 +168,13 @@ async function loadFloatingModel(
 }
 
 export const Avatar = forwardRef<AvatarHandle, Props>(function Avatar(
-  { avatarUrl, cameraDistance = CAMERA_DISTANCE, getMouthLevel, onStatus },
+  {
+    avatarUrl,
+    cameraDistance = CAMERA_DISTANCE,
+    background = "none",
+    getMouthLevel,
+    onStatus,
+  },
   ref,
 ) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -170,6 +183,10 @@ export const Avatar = forwardRef<AvatarHandle, Props>(function Avatar(
   const distanceRef = useRef(cameraDistance);
   distanceRef.current = cameraDistance;
   const reframeRef = useRef<(() => void) | null>(null);
+  // Same arrangement for the backdrop: the setup effect installs a swapper.
+  const backgroundRef = useRef(background);
+  backgroundRef.current = background;
+  const applyBackgroundRef = useRef<((id: Background) => void) | null>(null);
   // Keep the latest callbacks without restarting the render loop.
   const levelRef = useRef(getMouthLevel);
   levelRef.current = getMouthLevel;
@@ -214,6 +231,24 @@ export const Avatar = forwardRef<AvatarHandle, Props>(function Avatar(
     container.appendChild(renderer.domElement);
 
     const scene = new THREE.Scene();
+
+    // Backdrop (classroom etc.). Built fresh on each switch and torn down
+    // with the scene; a no-op when asked for the one already in place.
+    let backdrop: THREE.Group | null = null;
+    let backdropId: Background | null = null;
+    const applyBackground = (id: Background) => {
+      if (id === backdropId) return;
+      if (backdrop) {
+        scene.remove(backdrop);
+        disposeObject3D(backdrop);
+        backdrop = null;
+      }
+      backdrop = createBackground(id);
+      if (backdrop) scene.add(backdrop);
+      backdropId = id;
+    };
+    applyBackground(backgroundRef.current);
+    applyBackgroundRef.current = applyBackground;
 
     const camera = new THREE.PerspectiveCamera(30, width / height, 0.1, 20);
 
@@ -530,9 +565,14 @@ export const Avatar = forwardRef<AvatarHandle, Props>(function Avatar(
     return () => {
       disposed = true;
       reframeRef.current = null;
+      applyBackgroundRef.current = null;
       cancelAnimationFrame(rafId);
       resizeObserver.disconnect();
       controls.dispose();
+      if (backdrop) {
+        scene.remove(backdrop);
+        disposeObject3D(backdrop);
+      }
       if (sun) {
         scene.remove(sun);
         disposeObject3D(sun);
@@ -551,6 +591,11 @@ export const Avatar = forwardRef<AvatarHandle, Props>(function Avatar(
   useEffect(() => {
     reframeRef.current?.();
   }, [cameraDistance]);
+
+  // Swap the backdrop in place for the same reason.
+  useEffect(() => {
+    applyBackgroundRef.current?.(background);
+  }, [background]);
 
   return <div ref={containerRef} className="h-full w-full" />;
 });
