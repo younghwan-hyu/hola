@@ -40,6 +40,11 @@ interface Props {
    */
   getMouthLevel: () => number;
   onStatus?: (status: AvatarStatus, message?: string) => void;
+  /**
+   * VRM download progress while status is "loading": 0..1, or null when the
+   * size isn't known. Ends before "ready" — parsing and the first frame follow.
+   */
+  onProgress?: (fraction: number | null) => void;
 }
 
 // Lip sync. Rather than mapping the exact RMS to a vowel shape (which looks off
@@ -174,6 +179,7 @@ export const Avatar = forwardRef<AvatarHandle, Props>(function Avatar(
     background = "none",
     getMouthLevel,
     onStatus,
+    onProgress,
   },
   ref,
 ) {
@@ -192,6 +198,8 @@ export const Avatar = forwardRef<AvatarHandle, Props>(function Avatar(
   levelRef.current = getMouthLevel;
   const statusRef = useRef(onStatus);
   statusRef.current = onStatus;
+  const progressRef = useRef(onProgress);
+  progressRef.current = onProgress;
   // Active gesture, read every frame by the render loop.
   const gestureRef = useRef<{ type: AvatarGesture; t: number } | null>(null);
 
@@ -343,7 +351,10 @@ export const Avatar = forwardRef<AvatarHandle, Props>(function Avatar(
 
     statusRef.current?.("loading");
 
-    loadVrm(avatarUrl, scene)
+    loadVrm(avatarUrl, scene, (loaded, total) => {
+      if (disposed) return;
+      progressRef.current?.(total > 0 ? Math.min(1, loaded / total) : null);
+    })
       .then((loaded) => {
         if (disposed) {
           VRMUtils.deepDispose(loaded.scene);

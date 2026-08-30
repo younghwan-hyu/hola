@@ -10,11 +10,21 @@ import { VRMLoaderPlugin, VRMUtils, type VRM } from "@pixiv/three-vrm";
  * A/I/U/E/O blendshapes onto the 1.0 `aa/ih/ou/ee/oh` expression presets, so the
  * lip-sync code keyed on `aa` works for either.
  */
-export async function loadVrm(url: string, scene: THREE.Scene): Promise<VRM> {
+export async function loadVrm(
+  url: string,
+  scene: THREE.Scene,
+  /**
+   * Download progress: bytes so far and the file size, or 0 for the size when
+   * the server didn't say (no Content-Length, e.g. a compressed transfer).
+   */
+  onProgress?: (loaded: number, total: number) => void,
+): Promise<VRM> {
   const loader = new GLTFLoader();
   loader.register((parser) => new VRMLoaderPlugin(parser));
 
-  const gltf = await loader.loadAsync(url);
+  const gltf = await loader.loadAsync(url, (event) => {
+    onProgress?.(event.loaded, event.lengthComputable ? event.total : 0);
+  });
   const vrm = gltf.userData.vrm as VRM | undefined;
   if (!vrm) {
     throw new Error("loaded glTF has no VRM extension");

@@ -95,6 +95,7 @@ const BACKGROUND_ICONS: Record<Background, LucideIcon> = {
 
 const MAX_BUBBLES = 2; // bubbles the inline mode shows at once
 const EXIT_MS = 350; // how long a bubble that left the inline window animates out
+const SPLASH_FADE_MS = 500; // full-screen loading cover fade-out (matches its duration-500)
 
 // 분리 모드 gives the log and the input the lower part of the column, so the 3D
 // pane is roughly half as tall — pull the camera in (default is 2.2m, see
@@ -111,6 +112,24 @@ export default function App() {
   const [audioSupported] = useState(() => StreamingPcmPlayer.isSupported());
   const [avatarStatus, setAvatarStatus] = useState<AvatarStatus>("loading");
   const [avatarError, setAvatarError] = useState<string | null>(null);
+  // VRM download progress (0..1) for the loading screen; null until known.
+  const [avatarProgress, setAvatarProgress] = useState<number | null>(null);
+  // Full-screen loading screen. The whole app is mounted underneath it from
+  // the start (so the 3D view, the PDF pane and the input bar lay themselves
+  // out and the VRM loads), but nothing shows until the avatar has drawn its
+  // first frame — then the cover fades and everything appears at once. It
+  // covers avatar switches too. On a load error it lifts as well: the app
+  // still works without the avatar, and the pane shows the error.
+  const [splash, setSplash] = useState<"shown" | "fading" | "hidden">("shown");
+  useEffect(() => {
+    if (avatarStatus === "loading") {
+      setSplash("shown");
+      return;
+    }
+    setSplash("fading");
+    const timer = window.setTimeout(() => setSplash("hidden"), SPLASH_FADE_MS);
+    return () => window.clearTimeout(timer);
+  }, [avatarStatus]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   // id of the AI bubble whose TTS audio is currently playing — drives the small
@@ -1207,6 +1226,43 @@ export default function App() {
 
   return (
     <div className="flex h-full w-full overflow-hidden bg-zinc-950">
+      {/* Full-screen loading cover — see the `splash` state. Fixed, so it hides
+          the PDF pane, the input bar and the modals as well as the 3D view. */}
+      {splash !== "hidden" && (
+        <div
+          role="status"
+          aria-live="polite"
+          className={`fixed inset-0 z-[100] flex flex-col items-center justify-center gap-5 bg-zinc-950 transition-opacity duration-500 ${
+            splash === "fading" ? "pointer-events-none opacity-0" : "opacity-100"
+          }`}
+        >
+          <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,_hsl(222_47%_13%)_0%,_hsl(222_84%_5%)_70%)]" />
+          <Loader2 className="relative h-9 w-9 animate-spin text-white/80" />
+          <p className="relative text-sm text-white/80">
+            아바타 불러오는 중…
+            {avatarProgress !== null && (
+              <span className="ml-2 tabular-nums text-white/60">
+                {Math.round(avatarProgress * 100)}%
+              </span>
+            )}
+          </p>
+          <div className="relative h-1 w-48 overflow-hidden rounded-full bg-white/10">
+            <div
+              className={`h-full rounded-full bg-white/70 ${
+                avatarProgress === null
+                  ? "w-1/3 animate-pulse"
+                  : "transition-[width] duration-300"
+              }`}
+              style={
+                avatarProgress === null
+                  ? undefined
+                  : { width: `${Math.round(avatarProgress * 100)}%` }
+              }
+            />
+          </div>
+        </div>
+      )}
+
       {/* 문서 조회 모드: PDF viewer pane left of the avatar (PC landscape only).
           Kept mounted while the mode is off so the opened PDF and its page
           survive toggling the mode; capture is gated on docMode in send(). */}
@@ -1240,27 +1296,22 @@ export default function App() {
                 onStatus={(status, message) => {
                   setAvatarStatus(status);
                   setAvatarError(message ?? null);
+                  if (status === "loading") setAvatarProgress(null);
                 }}
+                onProgress={setAvatarProgress}
               />
             )}
           </div>
 
-          {/* Avatar loading / error overlay */}
-          {avatarStatus !== "ready" && (
+          {/* Avatar load error (loading itself is the full-screen cover below) */}
+          {avatarStatus === "error" && (
             <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-              {avatarStatus === "loading" ? (
-                <div className="flex items-center gap-2 rounded-full bg-black/40 px-4 py-2 text-sm text-white/80 backdrop-blur">
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  아바타 불러오는 중…
-                </div>
-              ) : (
-                <div className="max-w-sm rounded-md border border-destructive/40 bg-destructive/15 px-4 py-3 text-center text-sm text-destructive">
-                  아바타를 불러오지 못했습니다
-                  {avatarError && (
-                    <p className="mt-1 text-xs opacity-80">{avatarError}</p>
-                  )}
-                </div>
-              )}
+              <div className="max-w-sm rounded-md border border-destructive/40 bg-destructive/15 px-4 py-3 text-center text-sm text-destructive">
+                아바타를 불러오지 못했습니다
+                {avatarError && (
+                  <p className="mt-1 text-xs opacity-80">{avatarError}</p>
+                )}
+              </div>
             </div>
           )}
 
